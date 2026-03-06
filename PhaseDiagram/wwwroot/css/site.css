@@ -1,0 +1,58 @@
+﻿/* Phase Envelope Page Styles */
+.composition-table {
+    max-height: 400px;
+    overflow-y: auto;
+    border: 1px solid #dee2e6;
+    border-radius: 0.25rem;
+    padding: 0.5rem;
+    background-color: #f8f9fa;
+}
+
+    .composition-table input[type="number"] {
+        text-align: right;
+    }
+
+.modal.show {
+    display: block;
+}
+
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+    opacity: 1;
+}
+
+#phaseEnvelopeChart {
+    min-height: 500px;
+}
+
+.spinner-border-sm {
+    width: 1rem;
+    height: 1rem;
+}
+
+.table-sm td {
+    padding: 0.25rem 0.5rem;
+}
+
+/* ── Phase envelope chart card body ──────────────────────────────────────────
+   Explicit height (not just max-height) is required so that child elements
+   using height:100% or flex:1 resolve to a finite pixel value.
+   Without an explicit height the flex chain collapses and Plotly re-inflates
+   on every render cycle, growing the plot past the viewport.
+
+   calc(100vh - 260px) accounts for:
+     navbar/top-row  ~50px
+     page title+sub  ~70px
+     Bootstrap py-4  ~48px
+     row margin      ~16px
+     card header     ~52px
+     card padding     ~8px  (p-2 = 8px top + 8px bottom)
+     checkbox toolbar ~16px  (inside PhaseEnvelopePlot)
+   Total offset: ~260px
+────────────────────────────────────────────────────────────────────────────── */
+.phase-envelope-card-body {
+    height: calc(100vh - 260px);
+    min-height: 320px;
+    max-height: 780px;       /* cap on very tall monitors so plot isn't excessive */
+    overflow: hidden;
+}

@@ -1,0 +1,94 @@
+﻿@using PhaseDiagram.Services.Thermo
+@inject IJSRuntime JSRuntime
+
+<div style="display:block;">
+    <div style="margin-bottom:4px; font-size:0.875rem;">
+        <label style="margin-right:16px;">
+            <input type="checkbox" @bind="ShowLiquidLines" @bind:after="UpdatePlot" />
+            Show Liquid Dropout Lines
+        </label>
+        <label>
+            <input type="checkbox" @bind="ShowRetrogradeShading" @bind:after="UpdatePlot" />
+            Shade Retrograde Region
+        </label>
+    </div>
+    <div id="@_chartId" style="display:block;"></div>
+</div>
+
+@code {
+    [Parameter] public string Title { get; set; } = "Phase Envelope Diagram";
+    [Parameter] public CoolPropPhaseEnvelopeService.PhaseEnvelopeResult? EnvelopeData { get; set; }
+    [Parameter] public List<ReferencePoint>? ReferencePoints { get; set; }
+    [Parameter] public bool ShowLiquidLines { get; set; } = true;
+    [Parameter] public bool ShowRetrogradeShading { get; set; } = true;
+
+    private string _chartId = $"pe-{Guid.NewGuid():N}";
+    private CoolPropPhaseEnvelopeService.PhaseEnvelopeResult? _lastRendered;
+
+    public class ReferencePoint
+    {
+        public string Label { get; set; } = string.Empty;
+        public double Temperature { get; set; }
+        public double Pressure { get; set; }
+        public string Color { get; set; } = "#FF0000";
+        public string Symbol { get; set; } = "circle";
+    }
+
+    // Strongly-typed DTOs — anonymous objects with ternary type mismatches
+    // cause System.Text.Json to throw during JS interop serialization.
+    // The exception is swallowed by InvokeVoidAsync, resulting in the JS
+    // function never being called at all (empty console).
+    private sealed record TPoint(double t, double p);
+    private sealed record TRefPoint(string label, double t, double p, string color, string symbol);
+    private sealed record TPlotData(
+        TPoint[] bubble,
+        TPoint[] dew,
+        TPoint? critical,
+        Dictionary<string, TPoint[]> liquidLines,
+        TRefPoint[] referencePoints,
+        bool showRetrograde);
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (EnvelopeData != null && !ReferenceEquals(EnvelopeData, _lastRendered))
+        {
+            _lastRendered = EnvelopeData;
+            await RenderChart();
+        }
+    }
+
+    private async Task UpdatePlot()
+    {
+        if (EnvelopeData != null)
+            await RenderChart();
+    }
+
+    private async Task RenderChart()
+    {
+        if (EnvelopeData == null) return;
+
+        var liquidLines = new Dictionary<string, TPoint[]>();
+        if (ShowLiquidLines && EnvelopeData.LiquidLines.Count > 0)
+        {
+            foreach (var kvp in EnvelopeData.LiquidLines)
+                liquidLines[kvp.Key.ToString()] =
+                    kvp.Value.Select(p => new TPoint(p.T_F, p.P_psia)).ToArray();
+        }
+
+        var plotData = new TPlotData(
+            bubble: EnvelopeData.Bubble.Select(p => new TPoint(p.T_F, p.P_psia)).ToArray(),
+            dew: EnvelopeData.Dew.Select(p => new TPoint(p.T_F, p.P_psia)).ToArray(),
+            critical: EnvelopeData.Critical.HasValue
+                                 ? new TPoint(EnvelopeData.Critical.Value.Tcrit_F,
+                                              EnvelopeData.Critical.Value.Pcrit_psia)
+                                 : null,
+            liquidLines: liquidLines,
+            referencePoints: ReferencePoints?.Select(rp =>
+                                 new TRefPoint(rp.Label, rp.Temperature, rp.Pressure, rp.Color, rp.Symbol))
+                                 .ToArray() ?? [],
+            showRetrograde: ShowRetrogradeShading
+        );
+
+        await JSRuntime.InvokeVoidAsync("phaseEnvelopePlot.render", _chartId, plotData);
+    }
+}
