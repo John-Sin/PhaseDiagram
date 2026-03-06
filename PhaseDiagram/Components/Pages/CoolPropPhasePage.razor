@@ -171,8 +171,8 @@
                 <div class="card-header bg-secondary text-white py-2">
                     <h6 class="mb-0"><i class="bi bi-graph-up-arrow"></i> Phase Envelope Diagram</h6>
                 </div>
-                @* display:block overrides Bootstrap's flex:1 1 auto on .card-body *@
-                <div class="card-body p-2" style="display:block;">
+                @* overflow:visible lets Plotly axis titles/legend render outside the strict plot boundary *@
+                <div class="card-body p-2" style="display:block; overflow:visible;">
                     @if (envelopeResult != null && string.IsNullOrEmpty(errorMessage))
                     {
                         <PhaseEnvelopePlot EnvelopeData="envelopeResult"
@@ -244,7 +244,7 @@
 @code {
     private string selectedBackend = "PR";
     private double minTempF = -250;
-    private double maxTempF = 400;
+    private double maxTempF = 500;
     private int points = 1000;
     private bool showLiquidLines = false;
     private bool showDropout1 = true;

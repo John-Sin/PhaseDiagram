@@ -1,7 +1,7 @@
 ﻿@using PhaseDiagram.Services.Thermo
 @inject IJSRuntime JSRuntime
 
-<div style="display:block;">
+<div style="display:block; overflow:visible;">
     <div style="margin-bottom:4px; font-size:0.875rem;">
         <label style="margin-right:16px;">
             <input type="checkbox" @bind="ShowLiquidLines" @bind:after="UpdatePlot" />
@@ -12,7 +12,7 @@
             Shade Retrograde Region
         </label>
     </div>
-    <div id="@_chartId" style="display:block;"></div>
+    <div id="@_chartId" style="display:block; overflow:visible;"></div>
 </div>
 
 @code {

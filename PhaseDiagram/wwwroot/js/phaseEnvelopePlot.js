@@ -16,7 +16,6 @@
             'height:' + this.PLOT_H + 'px',
             'max-width:' + this.PLOT_W + 'px',
             'max-height:' + this.PLOT_H + 'px',
-            'overflow:hidden',
             'flex:none',
             'display:block'
         ].join(';');
@@ -106,16 +105,14 @@
         const layout = {
             width: this.PLOT_W,
             height: this.PLOT_H,
-            margin: { l: 90, r: 30, t: 40, b: 70, pad: 4 },
+            margin: { l: 70, r: 30, t: 40, b: 70, pad: 0 },
             xaxis: {
-                title: { text: 'Temperature (°F)', font: { size: 13, color: '#333' }, standoff: 12 },
-                automargin: true,
+                title: { text: 'Temperature (°F)', font: { size: 13, color: '#333' } },
                 gridcolor: '#e6e6e6', showline: true, linewidth: 1,
                 linecolor: '#aaa', mirror: true, zeroline: false, ticks: 'outside'
             },
             yaxis: {
-                title: { text: 'Pressure (psia)', font: { size: 13, color: '#333' }, standoff: 12 },
-                automargin: true,
+                title: { text: 'Pressure (psia)', font: { size: 13, color: '#333' } },
                 gridcolor: '#e6e6e6', showline: true, linewidth: 1,
                 linecolor: '#aaa', mirror: true, zeroline: false,
                 rangemode: 'tozero', ticks: 'outside'
@@ -132,7 +129,7 @@
         };
 
         Plotly.newPlot(elementId, traces, layout, {
-            responsive: false,
+            responsive: true,
             displayModeBar: true,
             displaylogo: false,
             modeBarButtonsToRemove: ['lasso2d', 'select2d'],
