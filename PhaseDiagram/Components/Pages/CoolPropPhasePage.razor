@@ -1,5 +1,5 @@
 ﻿@page "/coolprop-phase"
-@rendermode InteractiveServer
+@rendermode @(new InteractiveServerRenderMode(prerender: false))
 @using PhaseDiagram.Services.Thermo
 @inject CoolPropPhaseEnvelopeService EnvelopeService
 
@@ -15,25 +15,26 @@
         </div>
     </div>
 
-    @* align-items-start: prevents Bootstrap from stretching columns to equal height,
-       which would make the card-body grow and fight the fixed plot size. *@
     <div class="row mt-2 align-items-start">
 
-        <!-- Left Panel -->
+        <!-- ── Left Panel ─────────────────────────────────────────────────── -->
         <div class="col-auto" style="width:240px;">
             <div class="card shadow-sm">
                 <div class="card-header bg-primary text-white py-2">
                     <h6 class="mb-0"><i class="bi bi-sliders"></i> Configuration</h6>
                 </div>
                 <div class="card-body px-2 py-2" style="overflow-x:hidden;">
+
                     <div class="mb-2">
                         <label class="form-label fw-bold mb-1" style="font-size:0.8rem;">Equation of State</label>
                         <div class="btn-group w-100" role="group">
                             <input type="radio" class="btn-check" id="backend-pr" name="backend"
-                                   checked="@(selectedBackend == "PR")" @onchange="@(() => selectedBackend = "PR")">
+                                   checked='@(selectedBackend == BackendPR)'
+                                   @onchange="@(() => selectedBackend = BackendPR)" />
                             <label class="btn btn-outline-primary btn-sm" for="backend-pr">Peng-Robinson</label>
                             <input type="radio" class="btn-check" id="backend-srk" name="backend"
-                                   checked="@(selectedBackend == "SRK")" @onchange="@(() => selectedBackend = "SRK")">
+                                   checked='@(selectedBackend == BackendSRK)'
+                                   @onchange="@(() => selectedBackend = BackendSRK)" />
                             <label class="btn btn-outline-primary btn-sm" for="backend-srk">SRK</label>
                         </div>
                     </div>
@@ -56,8 +57,8 @@
 
                     <div class="mb-2">
                         <label class="form-label fw-bold mb-1" style="font-size:0.8rem;">Envelope Points</label>
-                        <input type="number" class="form-control form-control-sm" @bind="points"
-                               min="20" max="2000" step="10" />
+                        <input type="number" class="form-control form-control-sm"
+                               @bind="points" min="20" max="2000" step="10" />
                         <small class="text-muted">More points = smoother</small>
                     </div>
 
@@ -66,16 +67,28 @@
                             <label class="form-label fw-bold mb-0" style="font-size:0.8rem;">Liquid Dropout (%)</label>
                             <div class="form-check form-switch mb-0">
                                 <input class="form-check-input" type="checkbox" id="enable-dropout"
-                                       @bind="showLiquidLines" />
+                                       @bind="showLiquidLines" @bind:after="OnDisplayToggleChanged" />
                                 <label class="form-check-label small text-muted" for="enable-dropout">
                                     @(showLiquidLines ? "On" : "Off")
                                 </label>
                             </div>
                         </div>
-                        <div class="form-check"><input class="form-check-input" type="checkbox" id="d1" @bind="showDropout1" /><label class="form-check-label" for="d1">1% Liquid</label></div>
-                        <div class="form-check"><input class="form-check-input" type="checkbox" id="d5" @bind="showDropout5" /><label class="form-check-label" for="d5">5% Liquid</label></div>
-                        <div class="form-check"><input class="form-check-input" type="checkbox" id="d10" @bind="showDropout10" /><label class="form-check-label" for="d10">10% Liquid</label></div>
-                        <div class="form-check"><input class="form-check-input" type="checkbox" id="d25" @bind="showDropout25" /><label class="form-check-label" for="d25">25% Liquid</label></div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="d1" @bind="showDropout1" />
+                            <label class="form-check-label" for="d1">1% Liquid</label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="d5" @bind="showDropout5" />
+                            <label class="form-check-label" for="d5">5% Liquid</label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="d10" @bind="showDropout10" />
+                            <label class="form-check-label" for="d10">10% Liquid</label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="d25" @bind="showDropout25" />
+                            <label class="form-check-label" for="d25">25% Liquid</label>
+                        </div>
                     </div>
 
                     <div class="mb-2">
@@ -121,21 +134,20 @@
                         </button>
                     </div>
 
-                    <button type="button" class="btn btn-primary w-100" @onclick="GenerateEnvelope"
-                            disabled="@isCalculating">
+                    <button type="button" class="btn btn-primary w-100"
+                            @onclick="GenerateEnvelope" disabled="@isCalculating">
                         @if (isCalculating)
                         {
                             <span class="spinner-border spinner-border-sm me-1"></span>
-
                             <span>Calculating...</span>
                         }
                         else
                         {
                             <i class="bi bi-graph-up"></i>
-
                             <span> Generate</span>
                         }
                     </button>
+
                 </div>
             </div>
 
@@ -156,47 +168,56 @@
                                     <tr><td><strong>Crit T:</strong></td><td>@envelopeResult.Critical.Value.Tcrit_F.ToString("F1") °F</td></tr>
                                     <tr><td><strong>Crit P:</strong></td><td>@envelopeResult.Critical.Value.Pcrit_psia.ToString("F0") psia</td></tr>
                                 }
-                                <tr><td><strong>Dropout:</strong></td><td>@envelopeResult.LiquidLines.Count lines</td></tr>
+                                <tr><td><strong>Dropout:</strong></td><td>@envelopeResult.LiquidLines.Count lines computed</td></tr>
                             </tbody>
                         </table>
                     </div>
                 </div>
             }
         </div>
-
-        <!-- Right Panel: card wraps content, does NOT stretch to row height -->
+        <!-- /Left Panel -->
+        <!-- ── Right Panel ────────────────────────────────────────────────── -->
         <div class="col-auto">
-            @* No h-100 on card — let it size to its content (the fixed 1025×575 plot) *@
-            <div class="card shadow-sm" style="display:inline-block;">
+            <div class="card shadow-sm">
                 <div class="card-header bg-secondary text-white py-2">
                     <h6 class="mb-0"><i class="bi bi-graph-up-arrow"></i> Phase Envelope Diagram</h6>
                 </div>
-                @* overflow:visible lets Plotly axis titles/legend render outside the strict plot boundary *@
-                <div class="card-body p-2" style="display:block; overflow:visible;">
-                    @if (envelopeResult != null && string.IsNullOrEmpty(errorMessage))
+                <div class="card-body p-2" style="position:relative;">
+
+                    <PhaseEnvelopePlot @ref="_plotComponent"
+                                       EnvelopeData="envelopeResult"
+                                       ShowLiquidLines="@showLiquidLines"
+                                       ShowRetrogradeShading="true"
+                                       PlotWidth="1125"
+                                       PlotHeight="620" />
+
+                    @if (isCalculating)
                     {
-                        <PhaseEnvelopePlot EnvelopeData="envelopeResult"
-                                           ShowLiquidLines="@showLiquidLines"
-                                           ShowRetrogradeShading="true" />
-                    }
-                    else if (isCalculating)
-                    {
-                        <div style="width:1025px;height:575px;display:flex;align-items:center;justify-content:center;">
+                        <div style="position:absolute;inset:0;display:flex;align-items:center;
+                                                justify-content:center;background:rgba(255,255,255,0.85);z-index:10;">
                             <div class="text-center">
-                                <div class="spinner-border text-primary" style="width:3rem;height:3rem;" role="status"></div>
+                                <div class="spinner-border text-primary"
+                                     style="width:3rem;height:3rem;" role="status"></div>
                                 <p class="mt-3 text-muted">Generating phase envelope...</p>
                             </div>
                         </div>
                     }
-                    else if (!string.IsNullOrEmpty(errorMessage))
+
+                    @if (!string.IsNullOrEmpty(errorMessage))
                     {
-                        <div style="width:1025px;" class="alert alert-danger mt-2">
-                            <h6>Error</h6><p class="mb-0">@errorMessage</p>
+                        <div style="position:absolute;inset:0;display:flex;align-items:center;
+                                                justify-content:center;background:rgba(255,255,255,0.95);z-index:10;">
+                            <div class="alert alert-danger m-3">
+                                <h6>Error</h6>
+                                <p class="mb-0">@errorMessage</p>
+                            </div>
                         </div>
                     }
-                    else
+
+                    @if (envelopeResult == null && !isCalculating && string.IsNullOrEmpty(errorMessage))
                     {
-                        <div style="width:1025px;height:575px;display:flex;align-items:center;justify-content:center;"
+                        <div style="position:absolute;inset:0;display:flex;align-items:center;
+                                                justify-content:center;background:rgba(255,255,255,0.95);z-index:10;"
                              class="text-muted">
                             <div class="text-center">
                                 <i class="bi bi-graph-up" style="font-size:4rem;opacity:0.3;"></i>
@@ -204,9 +225,12 @@
                             </div>
                         </div>
                     }
+
                 </div>
             </div>
         </div>
+        <!-- /Right Panel -->
+
     </div>
 </div>
 
@@ -217,7 +241,8 @@
             <div class="modal-content">
                 <div class="modal-header">
                     <h5 class="modal-title">Add Component</h5>
-                    <button type="button" class="btn-close" @onclick="@(() => showAddComponent = false)"></button>
+                    <button type="button" class="btn-close"
+                            @onclick="@(() => showAddComponent = false)"></button>
                 </div>
                 <div class="modal-body">
                     <label class="form-label">Select Component</label>
@@ -233,7 +258,10 @@
                     </select>
                 </div>
                 <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" @onclick="@(() => showAddComponent = false)">Cancel</button>
+                    <button type="button" class="btn btn-secondary"
+                            @onclick="@(() => showAddComponent = false)">
+                        Cancel
+                    </button>
                     <button type="button" class="btn btn-primary" @onclick="AddComponent">Add</button>
                 </div>
             </div>
@@ -242,6 +270,9 @@
 }
 
 @code {
+    private const string BackendPR = "PR";
+    private const string BackendSRK = "SRK";
+
     private string selectedBackend = "PR";
     private double minTempF = -250;
     private double maxTempF = 500;
@@ -250,7 +281,7 @@
     private bool showDropout1 = true;
     private bool showDropout5 = true;
     private bool showDropout10 = true;
-    private bool showDropout25 = false;
+    private bool showDropout25 = true;
     private Dictionary<string, double> composition = new();
     private readonly string[] availableComponents =
         ["C1", "C2", "C3", "iC4", "nC4", "iC5", "nC5", "C6", "C7", "C8", "C9", "C10", "CO2", "N2", "H2S"];
@@ -259,24 +290,59 @@
     private CoolPropPhaseEnvelopeService.PhaseEnvelopeResult? envelopeResult;
     private bool showAddComponent = false;
     private string selectedNewComponent = string.Empty;
+    private PhaseEnvelopePlot? _plotComponent;
 
     protected override void OnInitialized() => LoadGasCondensate();
 
     private void LoadGasCondensate() => composition = new()
-    { ["C1"] = 0.70, ["C2"] = 0.10, ["C3"] = 0.07, ["iC4"] = 0.02, ["nC4"] = 0.03, ["iC5"] = 0.02, ["nC5"] = 0.02, ["C6"] = 0.02, ["C7"] = 0.02 };
+    {
+        ["C1"] = 0.70,
+        ["C2"] = 0.10,
+        ["C3"] = 0.07,
+        ["iC4"] = 0.02,
+        ["nC4"] = 0.03,
+        ["iC5"] = 0.02,
+        ["nC5"] = 0.02,
+        ["C6"] = 0.02,
+        ["C7"] = 0.02
+    };
 
     private void LoadDryGas() => composition = new()
-    { ["C1"] = 0.85, ["C2"] = 0.08, ["C3"] = 0.04, ["nC4"] = 0.02, ["CO2"] = 0.01 };
+    {
+        ["C1"] = 0.85,
+        ["C2"] = 0.08,
+        ["C3"] = 0.04,
+        ["nC4"] = 0.02,
+        ["CO2"] = 0.01
+    };
 
     private void LoadBlackOil() => composition = new()
-    { ["C1"] = 0.40, ["C2"] = 0.08, ["C3"] = 0.07, ["nC4"] = 0.06, ["nC5"] = 0.05, ["C6"] = 0.08, ["C7"] = 0.10, ["C8"] = 0.08, ["C9"] = 0.05, ["C10"] = 0.03 };
+    {
+        ["C1"] = 0.40,
+        ["C2"] = 0.08,
+        ["C3"] = 0.07,
+        ["nC4"] = 0.06,
+        ["nC5"] = 0.05,
+        ["C6"] = 0.08,
+        ["C7"] = 0.10,
+        ["C8"] = 0.08,
+        ["C9"] = 0.05,
+        ["C10"] = 0.03
+    };
 
-    private void ShowAddComponentModal() { showAddComponent = true; selectedNewComponent = string.Empty; }
+    private void ShowAddComponentModal()
+    {
+        showAddComponent = true;
+        selectedNewComponent = string.Empty;
+    }
 
     private void AddComponent()
     {
         if (!string.IsNullOrEmpty(selectedNewComponent) && !composition.ContainsKey(selectedNewComponent))
-        { composition[selectedNewComponent] = 0.01; showAddComponent = false; }
+        {
+            composition[selectedNewComponent] = 0.01;
+            showAddComponent = false;
+        }
     }
 
     private void RemoveComponent(string name) => composition.Remove(name);
@@ -287,28 +353,34 @@
             composition[name] = Math.Clamp(v, 0, 1);
     }
 
+    private async Task OnDisplayToggleChanged()
+    {
+        if (_plotComponent != null && envelopeResult != null)
+            await _plotComponent.ForceRenderAsync();
+    }
+
     private async Task GenerateEnvelope()
     {
         isCalculating = true;
         errorMessage = string.Empty;
-        envelopeResult = null;
         StateHasChanged();
 
         try
         {
-            var liq = new List<double>();
-            if (showLiquidLines)
-            {
-                if (showDropout1) liq.Add(0.01);
-                if (showDropout5) liq.Add(0.05);
-                if (showDropout10) liq.Add(0.10);
-                if (showDropout25) liq.Add(0.25);
-            }
+            var allFractions = new List<double>();
+            if (showDropout1) allFractions.Add(0.01);
+            if (showDropout5) allFractions.Add(0.05);
+            if (showDropout10) allFractions.Add(0.10);
+            if (showDropout25) allFractions.Add(0.25);
+
+            var fractions = allFractions.Count > 0
+                ? allFractions.ToArray()
+                : [0.01, 0.05, 0.10, 0.25];
 
             envelopeResult = await Task.Run(() =>
                 EnvelopeService.GenerateEnvelopeOilfield(
                     selectedBackend, composition,
-                    minTempF, maxTempF, points, liq.ToArray()));
+                    minTempF, maxTempF, points, fractions));
         }
         catch (Exception ex)
         {

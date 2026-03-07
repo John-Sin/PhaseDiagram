@@ -18,15 +18,21 @@ if (!app.Environment.IsDevelopment())
 }
 
 app.UseHttpsRedirection();
-app.UseStaticFiles();
+
+app.UseStaticFiles(new StaticFileOptions
+{
+    OnPrepareResponse = ctx =>
+    {
+        ctx.Context.Response.Headers["Cache-Control"] = "no-cache, no-store";
+        ctx.Context.Response.Headers["Pragma"] = "no-cache";
+    }
+});
+
 app.UseAntiforgery();
 
 app.MapRazorComponents<App>()
     .AddInteractiveServerRenderMode();
 
-// ── CoolProp DLL health-check ────────────────────────────────────────────────
-// Run on a background thread so the web server starts and accepts requests
-// immediately. The check itself can take 2–5 s on first load (native DLL init).
 _ = Task.Run(() =>
 {
     try

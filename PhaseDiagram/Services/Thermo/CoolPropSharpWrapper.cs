@@ -6,11 +6,6 @@ using System.Text;
 
 namespace PhaseDiagram.Services.Thermo;
 
-/// <summary>
-/// Direct CoolProp wrapper using AbstractState C API for PR/SRK mixture support.
-/// All P/Invoke types match the actual CoolProp C header (CoolPropLib.h).
-/// Enum integers are resolved at startup via get_param_index / get_input_pair_index.
-/// </summary>
 public sealed class CoolPropSharpWrapper : ICoolPropWrapper
 {
     private const string CoolPropLib = "CoolProp64";
@@ -50,6 +45,11 @@ public sealed class CoolPropSharpWrapper : ICoolPropWrapper
     private static extern void AbstractState_specify_phase(
         int handle, string phase,
         ref int errCode, byte[] errMsg, int errMsgLen);
+
+    [DllImport(CoolPropLib, EntryPoint = "AbstractState_unspecify_phase",
+        CallingConvention = CallingConvention.Cdecl)]
+    private static extern void AbstractState_unspecify_phase(
+        int handle, ref int errCode, byte[] errMsg, int errMsgLen);
 
     [DllImport(CoolPropLib, EntryPoint = "AbstractState_build_phase_envelope",
         CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
@@ -100,19 +100,17 @@ public sealed class CoolPropSharpWrapper : ICoolPropWrapper
 
     static CoolPropSharpWrapper()
     {
-        iT      = ResolveParam("T");
-        iP      = ResolveParam("P");
-        iQ      = ResolveParam("Q");
-        iPhase  = ResolveParam("Phase");
+        iT = ResolveParam("T");
+        iP = ResolveParam("P");
+        iQ = ResolveParam("Q");
+        iPhase = ResolveParam("Phase");
         iT_critical = ResolveParam("T_critical");
 
         iP_critical = TryResolveParam("P_critical") ?? TryResolveParam("p_critical")
-            ?? throw new InvalidOperationException(
-                "[CoolProp] Could not resolve critical pressure parameter.");
+            ?? throw new InvalidOperationException("[CoolProp] Could not resolve critical pressure parameter.");
 
         imolar_mass = TryResolveParam("molar_mass") ?? TryResolveParam("M")
-            ?? throw new InvalidOperationException(
-                "[CoolProp] Could not resolve molar mass parameter.");
+            ?? throw new InvalidOperationException("[CoolProp] Could not resolve molar mass parameter.");
 
         PQ_INPUTS = ResolveInputPair("PQ_INPUTS");
         QT_INPUTS = ResolveInputPair("QT_INPUTS");
@@ -126,8 +124,7 @@ public sealed class CoolPropSharpWrapper : ICoolPropWrapper
 
     private static int ResolveParam(string name)
         => TryResolveParam(name)
-           ?? throw new InvalidOperationException(
-               $"[CoolProp] get_param_index('{name}') returned -1.");
+           ?? throw new InvalidOperationException($"[CoolProp] get_param_index('{name}') returned -1.");
 
     private static int? TryResolveParam(string name)
     {
@@ -139,17 +136,87 @@ public sealed class CoolPropSharpWrapper : ICoolPropWrapper
     {
         long idx = get_input_pair_index(name);
         if (idx < 0)
-            throw new InvalidOperationException(
-                $"[CoolProp] get_input_pair_index('{name}') returned {idx}.");
+            throw new InvalidOperationException($"[CoolProp] get_input_pair_index('{name}') returned {idx}.");
         return (int)idx;
     }
 
     // ── Public API ────────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Get saturation pressure at T and Q. Pure fluids (HEOS) only.
-    /// For mixtures use <see cref="GetSaturationTempAtPQ"/>.
-    /// </summary>
+    public static int CreateMixtureHandle(string backend, string[] componentNames, double[] moleFractions)
+    {
+        var errMsg = new byte[ErrBufSize];
+        int errCode = 0;
+
+        string separator = backend is "PR" or "SRK" ? "&" : "|";
+        string fluids = string.Join(separator, componentNames.Select(MapFluid));
+
+        int handle = AbstractState_factory(backend, fluids, ref errCode, errMsg, ErrBufSize);
+        if (errCode != 0 || handle < 0)
+        {
+            LogCoolPropError("CreateMixtureHandle/factory", errCode, errMsg);
+            return -1;
+        }
+
+        AbstractState_set_fractions(handle, moleFractions, moleFractions.Length,
+            ref errCode, errMsg, ErrBufSize);
+        if (errCode != 0)
+        {
+            LogCoolPropError("CreateMixtureHandle/set_fractions", errCode, errMsg);
+            FreeHandle(ref handle, errMsg);
+            return -1;
+        }
+
+        // Do NOT call specify_phase here. Forcing "phase_twophase" causes
+        // CoolProp to hang when a PT flash lands in a single-phase region
+        // (which the bisection routine probes frequently). Let CoolProp
+        // auto-detect the phase on each update call instead.
+
+        return handle;
+    }
+
+    public static void FreeMixtureHandle(int handle)
+    {
+        if (handle >= 0)
+        {
+            int freeErr = 0;
+            var buf = new byte[ErrBufSize];
+            AbstractState_free(handle, ref freeErr, buf, ErrBufSize);
+        }
+    }
+
+    public static (double quality, string phase, bool success) FlashPTWithHandle(
+        int handle, double temperatureK, double pressurePa)
+    {
+        if (handle < 0) return (0, "unknown", false);
+
+        var errMsg = new byte[ErrBufSize];
+        int errCode = 0;
+
+        try
+        {
+            AbstractState_update(handle, PT_INPUTS, pressurePa, temperatureK,
+                ref errCode, errMsg, ErrBufSize);
+            if (errCode != 0) return (0, "not_twophase", false);
+
+            double phaseIndex = AbstractState_keyed_output(handle, iPhase,
+                ref errCode, errMsg, ErrBufSize);
+            if (errCode != 0) return (0, "unknown", false);
+
+            string phase = GetPhaseString(phaseIndex);
+
+            double quality = AbstractState_keyed_output(handle, iQ,
+                ref errCode, errMsg, ErrBufSize);
+            if (!double.IsFinite(quality))
+                quality = phase == "gas" ? 1.0 : 0.0;
+
+            return (quality, phase, true);
+        }
+        catch
+        {
+            return (0, "unknown", false);
+        }
+    }
+
     public static (double pressurePa, bool success) GetSaturationPressureAtTQ(
         string backend, string[] componentNames, double[] moleFractions,
         double temperatureK, double vaporQuality)
@@ -162,10 +229,6 @@ public sealed class CoolPropSharpWrapper : ICoolPropWrapper
         return (0, false);
     }
 
-    /// <summary>
-    /// Get saturation temperature at P and Q using PQ_INPUTS.
-    /// The only mixture saturation flash supported by CoolProp's PR/SRK backend.
-    /// </summary>
     public static (double temperatureK, bool success) GetSaturationTempAtPQ(
         string backend, string[] componentNames, double[] moleFractions,
         double pressurePa, double vaporQuality)
@@ -193,7 +256,6 @@ public sealed class CoolPropSharpWrapper : ICoolPropWrapper
                 ref errCode, errMsg, ErrBufSize);
             if (errCode != 0) { LogCoolPropError("set_fractions", errCode, errMsg); return (0, false); }
 
-            // PQ_INPUTS: value1 = P (Pa), value2 = Q
             AbstractState_update(handle, PQ_INPUTS, pressurePa, vaporQuality,
                 ref errCode, errMsg, ErrBufSize);
             if (errCode != 0) { LogCoolPropError("update(PQ)", errCode, errMsg); return (0, false); }
@@ -215,10 +277,6 @@ public sealed class CoolPropSharpWrapper : ICoolPropWrapper
         }
     }
 
-    /// <summary>
-    /// PT flash — returns vapor quality and phase at given T and P.
-    /// Supported by all backends including PR/SRK mixtures.
-    /// </summary>
     public static (double quality, string phase, bool success) GetPhaseAtTP(
         string backend, string[] componentNames, double[] moleFractions,
         double temperatureK, double pressurePa)
@@ -239,7 +297,6 @@ public sealed class CoolPropSharpWrapper : ICoolPropWrapper
                 ref errCode, errMsg, ErrBufSize);
             if (errCode != 0) return (0, "unknown", false);
 
-            // PT_INPUTS: value1 = P, value2 = T
             AbstractState_update(handle, PT_INPUTS, pressurePa, temperatureK,
                 ref errCode, errMsg, ErrBufSize);
             if (errCode != 0) return (0, "unknown", false);
@@ -266,17 +323,23 @@ public sealed class CoolPropSharpWrapper : ICoolPropWrapper
     }
 
     /// <summary>
-    /// Builds the full phase envelope for a mixture using CoolProp's internal
-    /// continuation solver.
+    /// Builds the full phase envelope.
     ///
-    /// CoolProp PR/SRK always begins tracing from the DEW side (Q≈1, rhoLiq > rhoVap).
-    /// Raw array layout:
-    ///   indices 0 → critIdx   : dew side  (high-T → Tcrit, decreasing T)
-    ///   indices critIdx → end : bubble side (Tcrit → low-T, decreasing T)
+    /// CoolProp raw array: all n points in the order the continuation solver
+    /// traced them. The critical point is at the pressure maximum (critIdx).
+    /// Points 0..critIdx are one physical side; critIdx..n-1 are the other.
+    ///
+    /// Physical assignment uses rhoLiq vs rhoVap at index 0:
+    ///   rhoLiq[0] > rhoVap[0]  →  index 0 is on the DEW side  (Q≈1)
+    ///   rhoLiq[0] < rhoVap[0]  →  index 0 is on the BUBBLE side (Q≈0)
+    ///
+    /// The post-critical tail is taken as ALL points from critIdx to n-1
+    /// whose pressure is strictly decreasing (no 2% tolerance — that was
+    /// cutting the dew curve too short and causing the empty-dew bug).
     ///
     /// Returns:
-    ///   bubble : low-T → Tcrit          (ascending T, Q=0 saturation line)
-    ///   dew    : Tcrit → cricondentherm  (ascending T, Q=1 saturation line)
+    ///   bubble : ascending T, Q=0 side
+    ///   dew    : ascending T, Q=1 side (Tcrit → cricondentherm)
     /// </summary>
     public static (
         (double T_K, double P_Pa)[] bubble,
@@ -294,11 +357,7 @@ public sealed class CoolPropSharpWrapper : ICoolPropWrapper
             string fluids = string.Join(separator, componentNames.Select(MapFluid));
 
             handle = AbstractState_factory(backend, fluids, ref errCode, errMsg, ErrBufSize);
-            if (errCode != 0 || handle < 0)
-            {
-                LogCoolPropError("factory", errCode, errMsg);
-                return ([], [], null);
-            }
+            if (errCode != 0 || handle < 0) { LogCoolPropError("factory", errCode, errMsg); return ([], [], null); }
 
             AbstractState_set_fractions(handle, moleFractions, moleFractions.Length,
                 ref errCode, errMsg, ErrBufSize);
@@ -310,12 +369,12 @@ public sealed class CoolPropSharpWrapper : ICoolPropWrapper
             const int MaxEnvelopePoints = 600;
             const int MaxComponents = 20;
 
-            var T_arr     = new double[MaxEnvelopePoints];
-            var p_arr     = new double[MaxEnvelopePoints];
+            var T_arr = new double[MaxEnvelopePoints];
+            var p_arr = new double[MaxEnvelopePoints];
             var rhoVap_arr = new double[MaxEnvelopePoints];
             var rhoLiq_arr = new double[MaxEnvelopePoints];
-            var x_arr     = new double[MaxEnvelopePoints * MaxComponents];
-            var y_arr     = new double[MaxEnvelopePoints * MaxComponents];
+            var x_arr = new double[MaxEnvelopePoints * MaxComponents];
+            var y_arr = new double[MaxEnvelopePoints * MaxComponents];
 
             int dataCode = 0;
             var dataBuf = new byte[ErrBufSize];
@@ -325,7 +384,7 @@ public sealed class CoolPropSharpWrapper : ICoolPropWrapper
 
             if (dataCode != 0) { LogCoolPropError("get_phase_envelope_data", dataCode, dataBuf); return ([], [], null); }
 
-            // Trim trailing unfilled slots.
+            // Trim trailing zero-filled slots.
             int n = 0;
             for (int i = 0; i < MaxEnvelopePoints; i++)
             {
@@ -341,76 +400,58 @@ public sealed class CoolPropSharpWrapper : ICoolPropWrapper
                 return ([], [], null);
             }
 
-            // ── Critical point: maximum pressure index. ──────────────────────────────
+            // Critical point = pressure maximum.
             int critIdx = 0;
             double pMax = double.MinValue;
             for (int i = 0; i < n; i++)
-            {
                 if (p_arr[i] > pMax) { pMax = p_arr[i]; critIdx = i; }
-            }
             critIdx = Math.Clamp(critIdx, 0, n - 1);
 
-            // ── Identify which physical side CoolProp started on. ────────────────────
-            // On the dew side, liquid density is always greater than vapour density.
+            // Physical side identification.
             bool startsOnDewSide = rhoLiq_arr[0] > rhoVap_arr[0];
 
-            // ── Sanitize the post-critical tail. ────────────────────────────────────
-            // The old approach (stop at first pressure increase) was too aggressive:
-            // it discarded valid tail points that had tiny solver oscillations, leaving
-            // only a handful of points and causing angular line segments on the plot.
-            //
-            // New approach — cumulative-minimum tolerance:
-            //   Keep a running minimum of pressure seen so far on this side.
-            //   Only stop when pressure rises more than PressureRiseTolerance (2%)
-            //   above that running minimum. This allows small numerical wobbles but
-            //   still stops genuine solver divergence / overshoot artifacts.
-            const double PressureRiseTolerance = 0.02;   // 2% above running minimum
+            // Post-critical tail: take ALL remaining points (critIdx..n-1).
+            int otherEnd = n - 1;
 
-            int otherEnd = critIdx;
-            double pRunMin = p_arr[critIdx];
-            for (int i = critIdx + 1; i < n; i++)
-            {
-                double pCurr = p_arr[i];
-                if (!double.IsFinite(pCurr) || pCurr <= 0) break;
+            // Log every point for diagnosis on the first call.
+            System.Diagnostics.Debug.WriteLine(
+                $"[CoolProp] BuildPhaseEnvelope: n={n}, critIdx={critIdx}, otherEnd={otherEnd}, " +
+                $"startsOnDewSide={startsOnDewSide}");
+            System.Diagnostics.Debug.WriteLine(
+                $"[CoolProp]   Raw T range: {T_arr[0] - 273.15:F1}→{T_arr[n - 1] - 273.15:F1}°C, " +
+                $"P range: {p_arr[0] / 6894.76:F0}→{p_arr[n - 1] / 6894.76:F0} psia, " +
+                $"Pcrit={p_arr[critIdx] / 6894.76:F0} psia @ idx {critIdx}");
 
-                // Update the running minimum so legitimate pressure drop is tracked.
-                if (pCurr < pRunMin) pRunMin = pCurr;
-
-                // Stop only when pressure climbs more than tolerance above the minimum
-                // seen so far — genuine overshoot, not a small numerical oscillation.
-                if (pCurr > pRunMin * (1.0 + PressureRiseTolerance)) break;
-
-                otherEnd = i;
-            }
-
-            // ── Build output arrays with correct physical assignment. ────────────────
             (double T_K, double P_Pa)[] bubble;
             (double T_K, double P_Pa)[] dew;
 
             if (startsOnDewSide)
             {
-                // 0 → critIdx  = DEW  (high-T → Tcrit); reverse → Tcrit first (ascending T)
+                // Indices 0..critIdx = dew side (traced high-T → Tcrit).
+                // Reverse so output is ascending T (Tcrit → cricondentherm).
                 int dewCount = critIdx + 1;
-                dew = new (double T_K, double P_Pa)[dewCount];
+                dew = new (double, double)[dewCount];
                 for (int i = 0; i < dewCount; i++)
                     dew[i] = (T_arr[critIdx - i], p_arr[critIdx - i]);
 
-                // critIdx → otherEnd = BUBBLE (Tcrit → low-T); reverse → low-T first
+                // Indices critIdx..otherEnd = bubble side (traced Tcrit → low-T).
+                // Reverse so output is ascending T (low-T → Tcrit).
                 int bubCount = otherEnd - critIdx + 1;
-                bubble = new (double T_K, double P_Pa)[bubCount];
+                bubble = new (double, double)[bubCount];
                 for (int i = 0; i < bubCount; i++)
                     bubble[i] = (T_arr[otherEnd - i], p_arr[otherEnd - i]);
             }
             else
             {
-                // Rare: starts on bubble side.
+                // Indices 0..critIdx = bubble side.
                 int bubCount = critIdx + 1;
-                bubble = new (double T_K, double P_Pa)[bubCount];
+                bubble = new (double, double)[bubCount];
                 for (int i = 0; i < bubCount; i++)
                     bubble[i] = (T_arr[critIdx - i], p_arr[critIdx - i]);
 
+                // Indices critIdx..otherEnd = dew side.
                 int dewCount = otherEnd - critIdx + 1;
-                dew = new (double T_K, double P_Pa)[dewCount];
+                dew = new (double, double)[dewCount];
                 for (int i = 0; i < dewCount; i++)
                     dew[i] = (T_arr[otherEnd - i], p_arr[otherEnd - i]);
             }
@@ -418,11 +459,11 @@ public sealed class CoolPropSharpWrapper : ICoolPropWrapper
             (double T_K, double P_Pa)? critical = (T_arr[critIdx], p_arr[critIdx]);
 
             System.Diagnostics.Debug.WriteLine(
-                $"[CoolProp] BuildPhaseEnvelope: n={n}, critIdx={critIdx}, otherEnd={otherEnd}, " +
-                $"startsOnDewSide={startsOnDewSide}, " +
-                $"bubble={bubble.Length} pts (T: {bubble[0].T_K - 273.15:F1}→{bubble[^1].T_K - 273.15:F1}°C), " +
-                $"dew={dew.Length} pts (T: {dew[0].T_K - 273.15:F1}→{dew[^1].T_K - 273.15:F1}°C), " +
-                $"Tcrit={critical.Value.T_K - 273.15:F1}°C, Pcrit={critical.Value.P_Pa / 6894.76:F0} psia");
+                $"[CoolProp]   bubble={bubble.Length} pts " +
+                $"T: {bubble[0].T_K - 273.15:F1}→{bubble[^1].T_K - 273.15:F1}°C  " +
+                $"dew={dew.Length} pts " +
+                $"T: {dew[0].T_K - 273.15:F1}→{dew[^1].T_K - 273.15:F1}°C  " +
+                $"Tcrit={critical.Value.T_K - 273.15:F1}°C Pcrit={critical.Value.P_Pa / 6894.76:F0} psia");
 
             return (bubble, dew, critical);
         }
@@ -446,7 +487,6 @@ public sealed class CoolPropSharpWrapper : ICoolPropWrapper
         try
         {
             string fluid = MapFluid(componentName);
-
             handle = AbstractState_factory("HEOS", fluid, ref errCode, errMsg, ErrBufSize);
             if (errCode != 0 || handle < 0)
                 throw new InvalidOperationException(
@@ -455,13 +495,11 @@ public sealed class CoolPropSharpWrapper : ICoolPropWrapper
             double tc = AbstractState_keyed_output(handle, iT_critical, ref errCode, errMsg, ErrBufSize);
             double pc = AbstractState_keyed_output(handle, iP_critical, ref errCode, errMsg, ErrBufSize);
             double mw = AbstractState_keyed_output(handle, imolar_mass, ref errCode, errMsg, ErrBufSize);
-
             return new ComponentCriticalProperties(componentName, tc, pc, 0, mw);
         }
         catch (Exception ex)
         {
-            throw new InvalidOperationException(
-                $"Failed to get critical properties for {componentName}", ex);
+            throw new InvalidOperationException($"Failed to get critical properties for {componentName}", ex);
         }
         finally
         {
@@ -477,22 +515,22 @@ public sealed class CoolPropSharpWrapper : ICoolPropWrapper
     private static readonly Dictionary<string, string> FluidMap =
         new(StringComparer.OrdinalIgnoreCase)
         {
-            ["Methane"]         = "Methane",
-            ["Ethane"]          = "Ethane",
-            ["Propane"]         = "Propane",
-            ["IsoButane"]       = "IsoButane",
-            ["n-Butane"]        = "n-Butane",
-            ["Isopentane"]      = "Isopentane",
-            ["n-Pentane"]       = "n-Pentane",
-            ["n-Hexane"]        = "n-Hexane",
-            ["n-Heptane"]       = "n-Heptane",
-            ["n-Octane"]        = "n-Octane",
-            ["n-Nonane"]        = "n-Nonane",
-            ["n-Decane"]        = "n-Decane",
-            ["CarbonDioxide"]   = "CarbonDioxide",
-            ["Nitrogen"]        = "Nitrogen",
+            ["Methane"] = "Methane",
+            ["Ethane"] = "Ethane",
+            ["Propane"] = "Propane",
+            ["IsoButane"] = "IsoButane",
+            ["n-Butane"] = "n-Butane",
+            ["Isopentane"] = "Isopentane",
+            ["n-Pentane"] = "n-Pentane",
+            ["n-Hexane"] = "n-Hexane",
+            ["n-Heptane"] = "n-Heptane",
+            ["n-Octane"] = "n-Octane",
+            ["n-Nonane"] = "n-Nonane",
+            ["n-Decane"] = "n-Decane",
+            ["CarbonDioxide"] = "CarbonDioxide",
+            ["Nitrogen"] = "Nitrogen",
             ["HydrogenSulfide"] = "HydrogenSulfide",
-            ["Water"]           = "Water",
+            ["Water"] = "Water",
         };
 
     private static string MapFluid(string name) =>
@@ -510,7 +548,6 @@ public sealed class CoolPropSharpWrapper : ICoolPropWrapper
         try
         {
             string fluid = MapFluid(componentName);
-
             double p = PropsSI("P", "T", temperatureK, "Q", vaporQuality, fluid);
             if (double.IsFinite(p) && p > 0) return (p, true);
 
@@ -562,11 +599,8 @@ public sealed class CoolPropSharpWrapper : ICoolPropWrapper
     }
 
     private static void LogCoolPropError(string context, int errCode, byte[] errMsg)
-    {
-        string msg = GetErrString(errMsg);
-        System.Diagnostics.Debug.WriteLine(
-            $"[CoolProp] {context} failed — errCode={errCode}, msg={msg}");
-    }
+        => System.Diagnostics.Debug.WriteLine(
+            $"[CoolProp] {context} failed — errCode={errCode}, msg={GetErrString(errMsg)}");
 
     private static string GetErrString(byte[] errMsg) =>
         Encoding.ASCII.GetString(errMsg).TrimEnd('\0', ' ');

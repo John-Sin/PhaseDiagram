@@ -1,0 +1,34 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html, body {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+        }
+
+        #plot {
+            width: 100%;
+            height: 100%;
+        }
+    </style>
+    <script src="https://cdn.plot.ly/plotly-2.35.3.min.js" charset="utf-8"></script>
+</head>
+<body>
+    <div id="plot"></div>
+    <script>// The parent window calls this to render the chart
+        window.renderPlot = function (data, layout, config) {
+            var el = document.getElementById('plot');
+            Plotly.purge(el);
+            Plotly.newPlot(el, data, layout, config);
+        };</script>
+</body>
+</html>

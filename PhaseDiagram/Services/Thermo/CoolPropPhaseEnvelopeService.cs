@@ -27,19 +27,20 @@ public sealed class CoolPropPhaseEnvelopeService
     private const double F_TO_K_OFFSET = 459.67;
     private const double F_TO_K_SCALE = 5.0 / 9.0;
 
-    // Maximum bubble-array points evaluated per dropout line.
-    // 40 T-steps produces a visually smooth line while keeping flash calls low:
-    // 40 pts × 22 bisection iterations × ~5 P/Invoke calls ≈ 4,400 calls/line.
-    private const int LiquidLineMaxPoints = 40;
+    // T-points sampled along the dew curve per dropout line.
+    private const int LiquidLineMaxPoints = 20;
 
-    // Bisection iterations per dropout point.
-    // 22 halvings → relative tolerance < 2.4×10⁻⁷ on the pressure interval.
-    private const int BisectMaxIter = 22;
+    // Bisection iterations per temperature point.
+    private const int BisectMaxIter = 25;
 
-    // CoolProp's C API uses global state internally (thread-local AbstractState
-    // pools that share a global registry mutex). Concurrent flash calls from
-    // multiple threads can deadlock on that mutex. The semaphore enforces that
-    // all CoolProp flash calls for dropout lines run one-at-a-time.
+    // Maximum consecutive non-two-phase results before aborting bisection.
+    private const int MaxConsecutiveMisses = 4;
+
+    // Timeout for a single PT flash call (ms). CoolProp cubic EOS PT flashes
+    // near phase boundaries can hang indefinitely; this prevents that.
+    private const int FlashTimeoutMs = 2000;
+
+    // CoolProp's C API uses a global handle registry — serialise all calls.
     private static readonly SemaphoreSlim _coolPropLock = new(1, 1);
 
     #endregion
@@ -120,15 +121,15 @@ public sealed class CoolPropPhaseEnvelopeService
         if (bubK.Length == 0 && dewK.Length == 0)
             Console.WriteLine($"[PhaseEnvelope] WARNING: No points for {string.Join("+", comps)} / {request.Backend}.");
 
-        var liqK = GenerateLiquidLines(comps, z, bubK, dewK, request.LiquidLines, request.Backend);
+        var liqK = GenerateLiquidLines(comps, z, bubK, dewK, critK, request.LiquidLines, request.Backend);
 
         return new PhaseEnvelopeResult(
             Bubble: ToFieldUnits(bubK),
             Dew: ToFieldUnits(dewK),
             LiquidLines: liqK.ToDictionary(kv => kv.Key, kv => ToFieldUnits(kv.Value)),
             Critical: critK.HasValue
-                             ? (KelvinToFahrenheit(critK.Value.T_K), PascalToPsia(critK.Value.P_Pa))
-                             : null,
+                ? (KelvinToFahrenheit(critK.Value.T_K), PascalToPsia(critK.Value.P_Pa))
+                : null,
             Backend: request.Backend,
             Components: comps,
             Composition: z);
@@ -174,50 +175,96 @@ public sealed class CoolPropPhaseEnvelopeService
 
     #region Liquid Dropout Lines
 
+    /// <summary>
+    /// Computes liquid dropout quality isolines in the RETROGRADE region only
+    /// (T > Tcrit, along the dew curve side).
+    ///
+    /// Each temperature point gets a FRESH CoolProp handle to avoid corrupted
+    /// internal state from failed PT flashes. Each individual flash call is
+    /// wrapped in a timeout to prevent indefinite hangs from CoolProp's cubic
+    /// EOS solver near phase boundaries.
+    /// </summary>
     private static Dictionary<double, (double T_K, double P_Pa)[]> GenerateLiquidLines(
         string[] comps, double[] z,
         (double T_K, double P_Pa)[] bubble,
         (double T_K, double P_Pa)[] dew,
+        (double T_K, double P_Pa)? critical,
         double[] liquidFractions, string backend)
     {
         var result = new Dictionary<double, (double T_K, double P_Pa)[]>();
 
-        if (bubble.Length < 2 || dew.Length < 2 || liquidFractions.Length == 0)
+        if (dew.Length < 2 || liquidFractions.Length == 0 || !critical.HasValue)
             return result;
 
-        var bubByT = bubble.OrderBy(p => p.T_K).ToArray();
+        double tCritK = critical.Value.T_K;
+        double pCritPa = critical.Value.P_Pa;
+
         var dewByT = dew.OrderBy(p => p.T_K).ToArray();
-        var thinBub = ThinArray(bubByT, LiquidLineMaxPoints);
+        var workDew = dewByT.Skip(1).Where(p => p.T_K > tCritK).ToArray();
 
-        Console.WriteLine($"[LiquidLines] {thinBub.Length} T-points × {liquidFractions.Length} fractions " +
-                          $"× max {BisectMaxIter} iters (sequential, serialized lock).");
+        if (workDew.Length < 2)
+        {
+            Console.WriteLine("[LiquidLines] Insufficient dew points beyond critical — skipping.");
+            return result;
+        }
 
-        // All CoolProp calls are serialized through _coolPropLock.
-        // CoolProp's C API shares global registry state — concurrent access deadlocks.
-        // Each fraction is computed fully before the next starts.
+        var thinDew = ThinArray(workDew, LiquidLineMaxPoints);
+
+        Console.WriteLine($"[LiquidLines] {thinDew.Length} dew T-points × {liquidFractions.Length} fractions. " +
+                          $"T range: {KelvinToFahrenheit(thinDew[0].T_K):F1}–" +
+                          $"{KelvinToFahrenheit(thinDew[^1].T_K):F1}°F, " +
+                          $"Pcrit={pCritPa / 6894.76:F0} psia.");
+
         foreach (double lf in liquidFractions)
         {
             var pts = new List<(double T, double P)>();
             double targetV = 1.0 - lf;
             int skipped = 0;
 
-            foreach (var bp in thinBub)
+            foreach (var dp in thinDew)
             {
-                double pDew = InterpolateByT(dewByT, bp.T_K);
-                double pLo = Math.Min(bp.P_Pa, pDew);
-                double pHi = Math.Max(bp.P_Pa, pDew);
+                double pOuter = dp.P_Pa;
+                double pInner = pCritPa;
 
-                if (pHi <= pLo * 1.001 || pHi <= 0) { skipped++; continue; }
+                double pLo = Math.Min(pOuter, pInner);
+                double pHi = Math.Max(pOuter, pInner);
 
-                double? p = BisectVaporFraction(comps, z, bp.T_K, pLo, pHi, targetV, backend);
-                if (p.HasValue) pts.Add((bp.T_K, p.Value));
-                else skipped++;
+                if ((pHi - pLo) / Math.Max(pHi, 1.0) < 0.005) { skipped++; continue; }
+
+                // Use a fresh handle per T-point so a failed/hung flash
+                // doesn't corrupt state for subsequent points.
+                _coolPropLock.Wait();
+                int handle = -1;
+                try
+                {
+                    handle = CoolPropSharpWrapper.CreateMixtureHandle(backend, comps, z);
+                    if (handle < 0) { skipped++; continue; }
+
+                    double? p = BisectWithHandle(handle, dp.T_K, pLo, pHi, targetV);
+                    if (p.HasValue) pts.Add((dp.T_K, p.Value));
+                    else skipped++;
+                }
+                catch
+                {
+                    skipped++;
+                }
+                finally
+                {
+                    if (handle >= 0)
+                        CoolPropSharpWrapper.FreeMixtureHandle(handle);
+                    _coolPropLock.Release();
+                }
             }
 
             if (pts.Count > 1)
+            {
                 result[lf] = pts.OrderBy(p => p.T).Select(p => (p.T, p.P)).ToArray();
+                Console.WriteLine($"[LiquidLines] LF={lf:P0}: {pts.Count} pts, {skipped} skipped.");
+            }
             else
+            {
                 Console.WriteLine($"[LiquidLines] LF={lf:P0}: {pts.Count} pt(s), {skipped} skipped — omitted.");
+            }
         }
 
         return result;
@@ -233,32 +280,61 @@ public sealed class CoolPropPhaseEnvelopeService
         return result;
     }
 
-    private static double? BisectVaporFraction(
-        string[] comps, double[] z,
-        double tempK, double pLo, double pHi, double targetV, string backend)
+    /// <summary>
+    /// Bisects for the pressure at which vapor quality equals <paramref name="targetV"/>
+    /// at fixed temperature. Each individual CoolProp flash is wrapped in a
+    /// timeout to prevent indefinite hangs from CoolProp's cubic EOS PT solver.
+    /// </summary>
+    private static double? BisectWithHandle(
+        int handle, double tempK, double pLo, double pHi, double targetV)
     {
-        // Probe the two-phase window and determine monotonicity.
-        double? vAtLo = GetVaporFractionAtTP(comps, z, tempK, pLo + (pHi - pLo) * 0.05, backend);
-        double? vAtHi = GetVaporFractionAtTP(comps, z, tempK, pLo + (pHi - pLo) * 0.95, backend);
+        // Quick scan: 3 probes to verify two-phase exists in this bracket.
+        const int ProbeCount = 3;
+        int validCount = 0;
+        double? qAtLow = null;
+        double? qAtHigh = null;
 
-        if (vAtLo is null && vAtHi is null) return null;
+        for (int pi = 0; pi < ProbeCount; pi++)
+        {
+            double frac = (pi + 1.0) / (ProbeCount + 1.0);
+            double pProbe = pLo + (pHi - pLo) * frac;
+            double? q = FlashQualityWithTimeout(handle, tempK, pProbe);
+            if (q is null) continue;
 
-        bool higherPLowersV = !(vAtLo.HasValue && vAtHi.HasValue) || vAtHi.Value < vAtLo.Value;
-        double vMin = Math.Min(vAtLo ?? 1.0, vAtHi ?? 0.0);
-        double vMax = Math.Max(vAtLo ?? 0.0, vAtHi ?? 1.0);
+            validCount++;
+            if (frac < 0.5) qAtLow = q;
+            else if (frac > 0.5) qAtHigh = q;
+        }
 
-        if (targetV < vMin - 0.05 || targetV > vMax + 0.05) return null;
+        if (validCount == 0) return null;
+
+        bool higherPLowersV = qAtLow.HasValue && qAtHigh.HasValue
+            ? qAtHigh.Value < qAtLow.Value
+            : true;
 
         double lo = pLo, hi = pHi;
+        int consecutiveMisses = 0;
 
         for (int it = 0; it < BisectMaxIter; it++)
         {
             double mid = 0.5 * (lo + hi);
-            if ((hi - lo) / Math.Max(Math.Abs(mid), 1.0) < 1e-7) return mid;
+            if ((hi - lo) / Math.Max(Math.Abs(mid), 1.0) < 1e-6) return mid;
 
-            double? V = GetVaporFractionAtTP(comps, z, tempK, mid, backend);
-            if (V is null) { hi = mid; continue; }
-            if (Math.Abs(V.Value - targetV) < 1e-4) return mid;
+            double? V = FlashQualityWithTimeout(handle, tempK, mid);
+
+            if (V is null)
+            {
+                consecutiveMisses++;
+                if (consecutiveMisses >= MaxConsecutiveMisses) return null;
+
+                double centre = 0.5 * (lo + hi);
+                if (mid > centre) hi = mid; else lo = mid;
+                continue;
+            }
+
+            consecutiveMisses = 0;
+
+            if (Math.Abs(V.Value - targetV) < 5e-4) return mid;
 
             if (higherPLowersV) { if (V.Value > targetV) lo = mid; else hi = mid; }
             else { if (V.Value > targetV) hi = mid; else lo = mid; }
@@ -268,24 +344,33 @@ public sealed class CoolPropPhaseEnvelopeService
     }
 
     /// <summary>
-    /// Wraps every CoolProp PT flash in the serializing semaphore.
-    /// This prevents concurrent access to CoolProp's global registry state,
-    /// which is the root cause of the "frozen calculating" deadlock.
+    /// PT flash with a hard timeout. CoolProp's cubic EOS PT flash can hang
+    /// indefinitely near phase boundaries for mixtures. Returns null on
+    /// timeout, non-two-phase, or any error.
     /// </summary>
-    private static double? GetVaporFractionAtTP(
-        string[] comps, double[] z, double tempK, double pressurePa, string backend)
+    private static double? FlashQualityWithTimeout(int handle, double tempK, double pressurePa)
     {
-        _coolPropLock.Wait();
         try
         {
-            var (quality, phase, success) = CoolPropSharpWrapper.GetPhaseAtTP(
-                backend, comps, z, tempK, pressurePa);
-            if (!success || phase != "twophase") return null;
-            return double.IsFinite(quality) ? quality : null;
+            double? result = null;
+            var task = Task.Run(() =>
+            {
+                var (quality, phase, success) = CoolPropSharpWrapper.FlashPTWithHandle(handle, tempK, pressurePa);
+                if (success && phase == "twophase" && double.IsFinite(quality))
+                    return (double?)quality;
+                return null;
+            });
+
+            if (task.Wait(FlashTimeoutMs))
+                result = task.Result;
+            else
+                Console.WriteLine($"[LiquidLines] Flash TIMEOUT at T={tempK:F1}K P={pressurePa / 6894.76:F0}psia");
+
+            return result;
         }
-        finally
+        catch
         {
-            _coolPropLock.Release();
+            return null;
         }
     }
 

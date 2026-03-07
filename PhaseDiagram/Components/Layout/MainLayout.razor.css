@@ -6,7 +6,7 @@
 
 main {
     flex: 1;
-    min-width: 0; /* prevent flex child from overflowing sidebar */
+    overflow-x: auto;
 }
 
 .sidebar {
