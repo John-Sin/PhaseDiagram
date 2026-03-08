@@ -3,6 +3,19 @@
 /// <summary>
 /// Phase envelope service using CoolProp PR/SRK build_phase_envelope.
 /// DEFAULT UNITS: Pressure in psia, Temperature in °F (Field/Oilfield Units)
+///
+/// Liquid dropout lines are computed using CoolProp's PQ flash (pressure +
+/// vapour quality → temperature).  Each dropout point is validated against
+/// the phase envelope boundaries.
+///
+/// The PQ flash can occasionally return the wrong root in the retrograde
+/// region, so each point is verified to lie between bubble and dew curves,
+/// and cross-line monotonicity is enforced as a final post-processing step.
+///
+/// NOTE: CoolProp's BuildPhaseEnvelope can mis-classify the retrograde dew
+/// tail as belonging to the bubble curve.  The boundary interpolation uses
+/// BOTH curves independently and takes the true outer boundary as
+/// max(dewMaxT, bubbleMaxT) at each pressure.
 /// </summary>
 public sealed class CoolPropPhaseEnvelopeService
 {
@@ -24,23 +37,17 @@ public sealed class CoolPropPhaseEnvelopeService
     #region Constants
 
     private const double PA_TO_PSI = 1.0 / 6894.757293168;
+    private const double PSI_TO_PA = 6894.757293168;
     private const double F_TO_K_OFFSET = 459.67;
     private const double F_TO_K_SCALE = 5.0 / 9.0;
 
-    // T-points sampled along the dew curve per dropout line.
-    private const int LiquidLineMaxPoints = 20;
+    /// <summary>Number of pressure levels to sample per dropout line.</summary>
+    private const int LiquidLinePoints = 100;
 
-    // Bisection iterations per temperature point.
-    private const int BisectMaxIter = 25;
+    /// <summary>Maximum total time (ms) for all liquid line calculations.</summary>
+    private const int TotalLiquidLineTimeoutMs = 60000;
 
-    // Maximum consecutive non-two-phase results before aborting bisection.
-    private const int MaxConsecutiveMisses = 4;
-
-    // Timeout for a single PT flash call (ms). CoolProp cubic EOS PT flashes
-    // near phase boundaries can hang indefinitely; this prevents that.
-    private const int FlashTimeoutMs = 2000;
-
-    // CoolProp's C API uses a global handle registry — serialise all calls.
+    /// <summary>CoolProp C API global handle — serialise all calls.</summary>
     private static readonly SemaphoreSlim _coolPropLock = new(1, 1);
 
     #endregion
@@ -173,17 +180,8 @@ public sealed class CoolPropPhaseEnvelopeService
 
     #endregion
 
-    #region Liquid Dropout Lines
+    #region Liquid Dropout Lines — PQ Flash with Envelope Clamping
 
-    /// <summary>
-    /// Computes liquid dropout quality isolines in the RETROGRADE region only
-    /// (T > Tcrit, along the dew curve side).
-    ///
-    /// Each temperature point gets a FRESH CoolProp handle to avoid corrupted
-    /// internal state from failed PT flashes. Each individual flash call is
-    /// wrapped in a timeout to prevent indefinite hangs from CoolProp's cubic
-    /// EOS solver near phase boundaries.
-    /// </summary>
     private static Dictionary<double, (double T_K, double P_Pa)[]> GenerateLiquidLines(
         string[] comps, double[] z,
         (double T_K, double P_Pa)[] bubble,
@@ -193,196 +191,456 @@ public sealed class CoolPropPhaseEnvelopeService
     {
         var result = new Dictionary<double, (double T_K, double P_Pa)[]>();
 
-        if (dew.Length < 2 || liquidFractions.Length == 0 || !critical.HasValue)
+        if ((dew.Length + bubble.Length) < 5 || liquidFractions.Length == 0 || !critical.HasValue)
             return result;
 
         double tCritK = critical.Value.T_K;
         double pCritPa = critical.Value.P_Pa;
 
-        var dewByT = dew.OrderBy(p => p.T_K).ToArray();
-        var workDew = dewByT.Skip(1).Where(p => p.T_K > tCritK).ToArray();
+        // ── Valid temperature range from the full envelope ──
+        double tMaxBub = bubble.Length > 0 ? bubble.Max(p => p.T_K) : double.MinValue;
+        double tMaxDew = dew.Length > 0 ? dew.Max(p => p.T_K) : double.MinValue;
+        double tMinBub = bubble.Length > 0 ? bubble.Min(p => p.T_K) : double.MaxValue;
+        double tMinDew = dew.Length > 0 ? dew.Min(p => p.T_K) : double.MaxValue;
+        double tMaxEnv = Math.Max(tMaxBub, tMaxDew);
+        double tMinEnv = Math.Min(tMinBub, tMinDew);
+        double tValidMin = tMinEnv - 2.0;
+        double tValidMax = tMaxEnv + 2.0;
 
-        if (workDew.Length < 2)
+        // ── Pressure sweep range ──
+        double pMinBub = bubble.Length > 0 ? bubble.Min(p => p.P_Pa) : double.MaxValue;
+        double pMinDew = dew.Length > 0 ? dew.Min(p => p.P_Pa) : double.MaxValue;
+        double pMinEnv = Math.Min(pMinBub, pMinDew);
+        double pFloor = Math.Max(pMinEnv * 0.90, 20000.0);
+        double pCeiling = pCritPa * 0.995;
+        if (pCeiling <= pFloor)
+            pCeiling = pCritPa * 0.9999;
+
+        Console.WriteLine($"[LiquidLines] PQ flash sweep: {liquidFractions.Length} fractions, " +
+                          $"{LiquidLinePoints} P-levels. " +
+                          $"P: {PascalToPsia(pFloor):F0}–{PascalToPsia(pCeiling):F0} psia, " +
+                          $"Pcrit={PascalToPsia(pCritPa):F0} psia, " +
+                          $"T envelope: {KelvinToFahrenheit(tValidMin):F0}–{KelvinToFahrenheit(tValidMax):F0}°F.");
+
+        var pressures = GeneratePressurePoints(pFloor, pCeiling, LiquidLinePoints);
+        var sortedFractions = liquidFractions.OrderBy(f => f).ToArray();
+        var allLines = new Dictionary<double, List<(double T_K, double P_Pa)>>();
+        var overallSw = System.Diagnostics.Stopwatch.StartNew();
+
+        foreach (double lf in sortedFractions)
         {
-            Console.WriteLine("[LiquidLines] Insufficient dew points beyond critical — skipping.");
-            return result;
-        }
-
-        var thinDew = ThinArray(workDew, LiquidLineMaxPoints);
-
-        Console.WriteLine($"[LiquidLines] {thinDew.Length} dew T-points × {liquidFractions.Length} fractions. " +
-                          $"T range: {KelvinToFahrenheit(thinDew[0].T_K):F1}–" +
-                          $"{KelvinToFahrenheit(thinDew[^1].T_K):F1}°F, " +
-                          $"Pcrit={pCritPa / 6894.76:F0} psia.");
-
-        foreach (double lf in liquidFractions)
-        {
-            var pts = new List<(double T, double P)>();
-            double targetV = 1.0 - lf;
-            int skipped = 0;
-
-            foreach (var dp in thinDew)
+            if (overallSw.ElapsedMilliseconds > TotalLiquidLineTimeoutMs)
             {
-                double pOuter = dp.P_Pa;
-                double pInner = pCritPa;
+                Console.WriteLine($"[LiquidLines] Timeout ({TotalLiquidLineTimeoutMs}ms) — stopping.");
+                break;
+            }
 
-                double pLo = Math.Min(pOuter, pInner);
-                double pHi = Math.Max(pOuter, pInner);
+            double vaporQ = 1.0 - lf;
+            var pts = new List<(double T_K, double P_Pa)>();
+            int skipped = 0, outOfRange = 0, clamped = 0;
 
-                if ((pHi - pLo) / Math.Max(pHi, 1.0) < 0.005) { skipped++; continue; }
+            foreach (double pPa in pressures)
+            {
+                if (overallSw.ElapsedMilliseconds > TotalLiquidLineTimeoutMs) break;
 
-                // Use a fresh handle per T-point so a failed/hung flash
-                // doesn't corrupt state for subsequent points.
                 _coolPropLock.Wait();
-                int handle = -1;
                 try
                 {
-                    handle = CoolPropSharpWrapper.CreateMixtureHandle(backend, comps, z);
-                    if (handle < 0) { skipped++; continue; }
+                    var (tempK, success) = CoolPropSharpWrapper.GetSaturationTempAtPQ(
+                        backend, comps, z, pPa, vaporQ);
 
-                    double? p = BisectWithHandle(handle, dp.T_K, pLo, pHi, targetV);
-                    if (p.HasValue) pts.Add((dp.T_K, p.Value));
-                    else skipped++;
+                    if (!success || !double.IsFinite(tempK) || tempK <= 0)
+                    {
+                        skipped++;
+                        continue;
+                    }
+
+                    if (tempK < tValidMin || tempK > tValidMax)
+                    {
+                        outOfRange++;
+                        continue;
+                    }
+
+                    // ── Envelope boundary clamping ──
+                    // BuildPhaseEnvelope can mis-classify the retrograde dew
+                    // tail into the bubble array.  Check BOTH curves for the
+                    // true outer boundary at this pressure.
+                    double rightBound = EnvelopeMaxT(bubble, dew, pPa);
+                    double leftBound = EnvelopeMinT(bubble, dew, pPa);
+
+                    if (rightBound > 0 && tempK > rightBound)
+                    {
+                        tempK = rightBound - 0.5;
+                        clamped++;
+                    }
+
+                    if (leftBound > 0 && tempK < leftBound)
+                    {
+                        tempK = leftBound + 0.5;
+                        clamped++;
+                    }
+
+                    // Dropout line must be INSIDE the envelope — strictly between
+                    // the left (bubble) and right (dew) boundaries.
+                    if (rightBound > 0 && leftBound > 0)
+                    {
+                        if (tempK <= leftBound || tempK >= rightBound)
+                        {
+                            outOfRange++;
+                            continue;
+                        }
+                    }
+
+                    if (tempK >= tValidMin && tempK <= tValidMax)
+                        pts.Add((tempK, pPa));
+                    else
+                        outOfRange++;
                 }
-                catch
-                {
-                    skipped++;
-                }
-                finally
-                {
-                    if (handle >= 0)
-                        CoolPropSharpWrapper.FreeMixtureHandle(handle);
-                    _coolPropLock.Release();
-                }
+                catch { skipped++; }
+                finally { _coolPropLock.Release(); }
             }
 
-            if (pts.Count > 1)
+            if (pts.Count > 2)
             {
-                result[lf] = pts.OrderBy(p => p.T).Select(p => (p.T, p.P)).ToArray();
-                Console.WriteLine($"[LiquidLines] LF={lf:P0}: {pts.Count} pts, {skipped} skipped.");
+                pts.Sort((a, b) => a.P_Pa.CompareTo(b.P_Pa));
+                var cleaned = RemoveOutliers(pts);
+
+                // ── CP-PROTECTION (per Michelsen/Nichita recommendation #4): ──
+                cleaned = TruncateAtDivergence(cleaned, tCritK, pCritPa);
+
+                // All isolines converge at the critical point.
+                if (cleaned.Count > 0)
+                    cleaned.Add((tCritK, pCritPa));
+
+                allLines[lf] = cleaned;
+                Console.WriteLine($"[LiquidLines] LF={lf:P0}: {cleaned.Count} pts (inc. CP), " +
+                                  $"{clamped} clamped, {skipped} failed, {outOfRange} out-of-range.");
             }
             else
             {
-                Console.WriteLine($"[LiquidLines] LF={lf:P0}: {pts.Count} pt(s), {skipped} skipped — omitted.");
+                Console.WriteLine($"[LiquidLines] LF={lf:P0}: {pts.Count} pt(s), " +
+                                  $"{skipped} failed, {outOfRange} out-of-range — omitted.");
             }
         }
 
-        return result;
-    }
+        // Enforce physical ordering: at any P, higher liquid fraction = lower T.
+        EnforceMonotonicity(allLines, sortedFractions, bubble, dew);
 
-    private static T[] ThinArray<T>(T[] arr, int maxPts)
-    {
-        if (arr.Length <= maxPts) return arr;
-        var result = new T[maxPts];
-        double step = (arr.Length - 1.0) / (maxPts - 1.0);
-        for (int i = 0; i < maxPts; i++)
-            result[i] = arr[(int)Math.Round(i * step)];
+        foreach (var kvp in allLines)
+            result[kvp.Key] = kvp.Value.ToArray();
+
         return result;
     }
 
     /// <summary>
-    /// Bisects for the pressure at which vapor quality equals <paramref name="targetV"/>
-    /// at fixed temperature. Each individual CoolProp flash is wrapped in a
-    /// timeout to prevent indefinite hangs from CoolProp's cubic EOS PT solver.
+    /// CP-PROTECTION TRUNCATION — two-pass adaptive detection.
+    ///
+    /// PASS 1 — Slope-jump: Compute median |ΔT| step from the lower
+    /// reliable portion (below 70% Pcrit). Any step exceeding 5× this
+    /// baseline above 60% Pcrit is a PQ flash root-jump — truncate.
+    ///
+    /// PASS 2 — Running-minimum drift trim: Walk backward from the end.
+    /// Track the smallest distance-to-Tcrit seen so far. Any point above
+    /// 80% Pcrit whose distance exceeds this running minimum by more than
+    /// 0.5K is drifting away from CP — remove it. This catches gradual
+    /// drift that Pass 1 misses, and unlike a simple consecutive check,
+    /// doesn't stop at the first non-drifting point.
     /// </summary>
-    private static double? BisectWithHandle(
-        int handle, double tempK, double pLo, double pHi, double targetV)
+    private static List<(double T_K, double P_Pa)> TruncateAtDivergence(
+        List<(double T_K, double P_Pa)> pts, double tCritK, double pCritPa)
     {
-        // Quick scan: 3 probes to verify two-phase exists in this bracket.
-        const int ProbeCount = 3;
-        int validCount = 0;
-        double? qAtLow = null;
-        double? qAtHigh = null;
+        if (pts.Count < 6) return pts;
 
-        for (int pi = 0; pi < ProbeCount; pi++)
+        // ════ PASS 1: Slope-jump detection ════
+        double pBaseline = pCritPa * 0.70;
+        var baselineSteps = new List<double>();
+
+        for (int i = 1; i < pts.Count; i++)
         {
-            double frac = (pi + 1.0) / (ProbeCount + 1.0);
-            double pProbe = pLo + (pHi - pLo) * frac;
-            double? q = FlashQualityWithTimeout(handle, tempK, pProbe);
-            if (q is null) continue;
-
-            validCount++;
-            if (frac < 0.5) qAtLow = q;
-            else if (frac > 0.5) qAtHigh = q;
+            if (pts[i].P_Pa > pBaseline) break;
+            baselineSteps.Add(Math.Abs(pts[i].T_K - pts[i - 1].T_K));
         }
 
-        if (validCount == 0) return null;
-
-        bool higherPLowersV = qAtLow.HasValue && qAtHigh.HasValue
-            ? qAtHigh.Value < qAtLow.Value
-            : true;
-
-        double lo = pLo, hi = pHi;
-        int consecutiveMisses = 0;
-
-        for (int it = 0; it < BisectMaxIter; it++)
+        if (baselineSteps.Count >= 3)
         {
-            double mid = 0.5 * (lo + hi);
-            if ((hi - lo) / Math.Max(Math.Abs(mid), 1.0) < 1e-6) return mid;
+            baselineSteps.Sort();
+            double medianStep = baselineSteps[baselineSteps.Count / 2];
+            double jumpThreshold = Math.Max(medianStep * 5.0, 2.0);
 
-            double? V = FlashQualityWithTimeout(handle, tempK, mid);
+            double pProtectionFloor = pCritPa * 0.60;
 
-            if (V is null)
+            for (int i = 1; i < pts.Count; i++)
             {
-                consecutiveMisses++;
-                if (consecutiveMisses >= MaxConsecutiveMisses) return null;
+                if (pts[i].P_Pa < pProtectionFloor) continue;
 
-                double centre = 0.5 * (lo + hi);
-                if (mid > centre) hi = mid; else lo = mid;
+                double step = Math.Abs(pts[i].T_K - pts[i - 1].T_K);
+                if (step > jumpThreshold)
+                {
+                    pts = pts.GetRange(0, i);
+                    break;
+                }
+            }
+        }
+
+        // ════ PASS 2: Running-minimum drift trim above 80% Pcrit ════
+        double pDriftFloor = pCritPa * 0.80;
+        double minDistSeen = double.MaxValue;
+        var keep = new bool[pts.Count];
+
+        // Mark all points below the drift floor as kept.
+        for (int i = 0; i < pts.Count; i++)
+        {
+            if (pts[i].P_Pa < pDriftFloor)
+                keep[i] = true;
+        }
+
+        // Walk backward through the near-CP zone.
+        for (int i = pts.Count - 1; i >= 0; i--)
+        {
+            if (pts[i].P_Pa < pDriftFloor) break;
+
+            double dist = Math.Abs(pts[i].T_K - tCritK);
+
+            if (dist <= minDistSeen + 0.5)
+            {
+                keep[i] = true;
+                minDistSeen = Math.Min(minDistSeen, dist);
+            }
+            else
+            {
+                keep[i] = false;
+            }
+        }
+
+        var result = new List<(double T_K, double P_Pa)>();
+        for (int i = 0; i < pts.Count; i++)
+            if (keep[i]) result.Add(pts[i]);
+
+        return result;
+    }
+
+    /// <summary>
+    /// The true right (high-T) envelope boundary at a given pressure.
+    /// Checks BOTH curves independently and returns the maximum T found.
+    /// This handles the case where BuildPhaseEnvelope mis-classifies
+    /// the retrograde dew tail as belonging to the bubble curve.
+    /// </summary>
+    private static double EnvelopeMaxT(
+        (double T_K, double P_Pa)[] bubble,
+        (double T_K, double P_Pa)[] dew,
+        double P)
+    {
+        double maxBub = InterpolateCurveMaxT(bubble, P);
+        double maxDew = InterpolateCurveMaxT(dew, P);
+
+        if (maxBub > 0 && maxDew > 0) return Math.Max(maxBub, maxDew);
+        if (maxBub > 0) return maxBub;
+        return maxDew; // may be 0 if neither curve brackets this P
+    }
+
+    /// <summary>
+    /// The true left (low-T) envelope boundary at a given pressure.
+    /// Checks BOTH curves independently and returns the minimum T found.
+    /// </summary>
+    private static double EnvelopeMinT(
+        (double T_K, double P_Pa)[] bubble,
+        (double T_K, double P_Pa)[] dew,
+        double P)
+    {
+        double minBub = InterpolateCurveMinT(bubble, P);
+        double minDew = InterpolateCurveMinT(dew, P);
+
+        if (minBub > 0 && minDew > 0) return Math.Min(minBub, minDew);
+        if (minBub > 0) return minBub;
+        return minDew;
+    }
+
+    #endregion
+
+    #region Monotonicity Enforcement
+
+    private static void EnforceMonotonicity(
+        Dictionary<double, List<(double T_K, double P_Pa)>> allLines,
+        double[] sortedFractions,
+        (double T_K, double P_Pa)[] bubble,
+        (double T_K, double P_Pa)[] dew)
+    {
+        for (int fi = 1; fi < sortedFractions.Length; fi++)
+        {
+            double lfSmaller = sortedFractions[fi - 1];
+            double lfLarger = sortedFractions[fi];
+
+            if (!allLines.ContainsKey(lfSmaller) || !allLines.ContainsKey(lfLarger))
                 continue;
-            }
 
-            consecutiveMisses = 0;
+            var outerLine = allLines[lfSmaller];
+            var innerLine = allLines[lfLarger];
 
-            if (Math.Abs(V.Value - targetV) < 5e-4) return mid;
-
-            if (higherPLowersV) { if (V.Value > targetV) lo = mid; else hi = mid; }
-            else { if (V.Value > targetV) hi = mid; else lo = mid; }
-        }
-
-        return 0.5 * (lo + hi);
-    }
-
-    /// <summary>
-    /// PT flash with a hard timeout. CoolProp's cubic EOS PT flash can hang
-    /// indefinitely near phase boundaries for mixtures. Returns null on
-    /// timeout, non-two-phase, or any error.
-    /// </summary>
-    private static double? FlashQualityWithTimeout(int handle, double tempK, double pressurePa)
-    {
-        try
-        {
-            double? result = null;
-            var task = Task.Run(() =>
+            for (int i = 0; i < innerLine.Count; i++)
             {
-                var (quality, phase, success) = CoolPropSharpWrapper.FlashPTWithHandle(handle, tempK, pressurePa);
-                if (success && phase == "twophase" && double.IsFinite(quality))
-                    return (double?)quality;
-                return null;
-            });
+                double p = innerLine[i].P_Pa;
+                double innerT = innerLine[i].T_K;
 
-            if (task.Wait(FlashTimeoutMs))
-                result = task.Result;
-            else
-                Console.WriteLine($"[LiquidLines] Flash TIMEOUT at T={tempK:F1}K P={pressurePa / 6894.76:F0}psia");
+                double outerT = InterpolateLineAtP(outerLine, p);
+                if (outerT <= 0) continue;
 
-            return result;
-        }
-        catch
-        {
-            return null;
+                if (innerT >= outerT)
+                {
+                    double leftBound = EnvelopeMinT(bubble, dew, p);
+                    double corrected = outerT - 1.0;
+                    if (leftBound > 0 && corrected < leftBound + 0.5)
+                        corrected = leftBound + 0.5;
+
+                    innerLine[i] = (corrected, p);
+                }
+            }
         }
     }
 
-    private static double InterpolateByT((double T_K, double P_Pa)[] sorted, double T)
+    private static double InterpolateLineAtP(List<(double T_K, double P_Pa)> line, double P)
     {
-        if (sorted.Length == 0) return 0;
-        if (T <= sorted[0].T_K) return sorted[0].P_Pa;
-        if (T >= sorted[^1].T_K) return sorted[^1].P_Pa;
-        int lo = 0, hi = sorted.Length - 1;
-        while (hi - lo > 1) { int m = (lo + hi) / 2; if (sorted[m].T_K <= T) lo = m; else hi = m; }
-        double frac = (T - sorted[lo].T_K) / (sorted[hi].T_K - sorted[lo].T_K);
-        return sorted[lo].P_Pa + frac * (sorted[hi].P_Pa - sorted[lo].P_Pa);
+        if (line.Count < 2) return 0;
+        if (P < line[0].P_Pa || P > line[^1].P_Pa) return 0;
+
+        for (int i = 0; i < line.Count - 1; i++)
+        {
+            if (P >= line[i].P_Pa && P <= line[i + 1].P_Pa)
+            {
+                double dp = line[i + 1].P_Pa - line[i].P_Pa;
+                if (Math.Abs(dp) < 1e-10) return line[i].T_K;
+                double frac = (P - line[i].P_Pa) / dp;
+                return line[i].T_K + frac * (line[i + 1].T_K - line[i].T_K);
+            }
+        }
+        return 0;
+    }
+
+    #endregion
+
+    #region Envelope Curve Interpolation
+
+    private static double InterpolateCurveMaxT((double T_K, double P_Pa)[] curve, double P)
+    {
+        if (curve.Length < 2) return 0;
+        double maxT = 0;
+        bool found = false;
+
+        for (int i = 0; i < curve.Length - 1; i++)
+        {
+            double p0 = curve[i].P_Pa, p1 = curve[i + 1].P_Pa;
+            double pMin = Math.Min(p0, p1), pMax = Math.Max(p0, p1);
+            if (P < pMin || P > pMax) continue;
+            double denom = p1 - p0;
+            if (Math.Abs(denom) < 1e-10) continue;
+            double frac = (P - p0) / denom;
+            double t = curve[i].T_K + frac * (curve[i + 1].T_K - curve[i].T_K);
+            if (t > maxT) { maxT = t; found = true; }
+        }
+        return found ? maxT : 0;
+    }
+
+    private static double InterpolateCurveMinT((double T_K, double P_Pa)[] curve, double P)
+    {
+        if (curve.Length < 2) return 0;
+        double minT = double.MaxValue;
+        bool found = false;
+
+        for (int i = 0; i < curve.Length - 1; i++)
+        {
+            double p0 = curve[i].P_Pa, p1 = curve[i + 1].P_Pa;
+            double pMin = Math.Min(p0, p1), pMax = Math.Max(p0, p1);
+            if (P < pMin || P > pMax) continue;
+            double denom = p1 - p0;
+            if (Math.Abs(denom) < 1e-10) continue;
+            double frac = (P - p0) / denom;
+            double t = curve[i].T_K + frac * (curve[i + 1].T_K - curve[i].T_K);
+            if (t < minT) { minT = t; found = true; }
+        }
+        return found ? minT : 0;
+    }
+
+    #endregion
+
+    #region Outlier Removal
+
+    private static List<(double T_K, double P_Pa)> RemoveOutliers(List<(double T_K, double P_Pa)> pts)
+    {
+        if (pts.Count <= 4)
+            return new List<(double T_K, double P_Pa)>(pts);
+
+        var slopes = new List<double>();
+        for (int i = 1; i < pts.Count; i++)
+        {
+            double dp = pts[i].P_Pa - pts[i - 1].P_Pa;
+            if (Math.Abs(dp) < 1e-6) continue;
+            slopes.Add(Math.Abs((pts[i].T_K - pts[i - 1].T_K) / dp));
+        }
+
+        if (slopes.Count < 3)
+            return new List<(double T_K, double P_Pa)>(pts);
+
+        slopes.Sort();
+        double medianSlope = slopes[slopes.Count / 2];
+        double slopeThreshold = Math.Max(medianSlope * 10.0, 0.001);
+
+        var keep = new bool[pts.Count];
+        keep[0] = true;
+        keep[pts.Count - 1] = true;
+
+        for (int i = 1; i < pts.Count - 1; i++)
+        {
+            double dpPrev = pts[i].P_Pa - pts[i - 1].P_Pa;
+            double dpNext = pts[i + 1].P_Pa - pts[i].P_Pa;
+
+            if (Math.Abs(dpPrev) < 1e-6 || Math.Abs(dpNext) < 1e-6)
+            { keep[i] = true; continue; }
+
+            double slopePrev = Math.Abs((pts[i].T_K - pts[i - 1].T_K) / dpPrev);
+            double slopeNext = Math.Abs((pts[i + 1].T_K - pts[i].T_K) / dpNext);
+
+            keep[i] = !(slopePrev > slopeThreshold && slopeNext > slopeThreshold);
+        }
+
+        var cleaned = new List<(double T_K, double P_Pa)>();
+        for (int i = 0; i < pts.Count; i++)
+            if (keep[i]) cleaned.Add(pts[i]);
+        return cleaned;
+    }
+
+    #endregion
+
+    #region Pressure Sampling
+
+    private static double[] GeneratePressurePoints(double pFloor, double pCeiling, int count)
+    {
+        int nLog = (int)(count * 0.40);
+        int nMid = (int)(count * 0.25);
+        int nTop = count - nLog - nMid;
+
+        var pressures = new HashSet<double>();
+
+        double logRatio = pCeiling / pFloor;
+        for (int i = 0; i < nLog; i++)
+        {
+            double frac = (double)i / Math.Max(nLog - 1, 1);
+            pressures.Add(pFloor * Math.Pow(logRatio, frac));
+        }
+
+        double pMidStart = pFloor + (pCeiling - pFloor) * 0.50;
+        for (int i = 0; i < nMid; i++)
+        {
+            double frac = (double)i / Math.Max(nMid - 1, 1);
+            pressures.Add(pMidStart + (pCeiling - pMidStart) * frac);
+        }
+
+        double pTopStart = pFloor + (pCeiling - pFloor) * 0.90;
+        for (int i = 0; i < nTop; i++)
+        {
+            double frac = (double)i / Math.Max(nTop - 1, 1);
+            pressures.Add(pTopStart + (pCeiling - pTopStart) * frac);
+        }
+
+        return pressures.OrderBy(p => p).ToArray();
     }
 
     #endregion

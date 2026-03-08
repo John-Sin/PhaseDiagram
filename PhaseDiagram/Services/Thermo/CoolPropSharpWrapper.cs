@@ -1,4 +1,5 @@
-﻿using System;
+﻿using SharpProp;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -616,4 +617,39 @@ public sealed class CoolPropSharpWrapper : ICoolPropWrapper
         6 => "unknown",
         _ => "unknown"
     };
+
+
+    /// <summary>
+    /// PT flash → vapor fraction using an EXISTING handle.
+    /// Avoids creating/destroying a handle on every bisection iteration.
+    /// The handle must have been created with CreateMixtureHandle().
+    /// </summary>
+    public static (double vaporFraction, bool success) GetVaporFractionWithHandle(
+        int handle, double pressurePa, double temperatureK)
+    {
+        if (handle < 0) return (double.NaN, false);
+
+        var errMsg = new byte[ErrBufSize];
+        int errCode = 0;
+
+        try
+        {
+            AbstractState_update(handle, PT_INPUTS, pressurePa, temperatureK,
+                ref errCode, errMsg, ErrBufSize);
+            if (errCode != 0) return (double.NaN, false);
+
+            double quality = AbstractState_keyed_output(handle, iQ,
+                ref errCode, errMsg, ErrBufSize);
+            if (errCode != 0) return (double.NaN, false);
+
+            if (double.IsFinite(quality) && quality >= 0.0 && quality <= 1.0)
+                return (quality, true);
+
+            return (quality, false);
+        }
+        catch
+        {
+            return (double.NaN, false);
+        }
+    }
 }

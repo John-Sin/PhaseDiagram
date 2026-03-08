@@ -24,7 +24,8 @@
 </head>
 <body>
     <div id="plot"></div>
-    <script>// The parent window calls this to render the chart
+    <script>
+    // The parent window calls this to render the chart
         window.renderPlot = function (data, layout, config) {
             var el = document.getElementById('plot');
             Plotly.purge(el);
