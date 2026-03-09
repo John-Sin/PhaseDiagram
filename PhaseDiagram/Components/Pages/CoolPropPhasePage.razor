@@ -41,29 +41,6 @@
                     </div>
 
                     <div class="mb-2">
-                        <label class="form-label fw-bold mb-1" style="font-size:0.8rem;">Temperature Range (°F)</label>
-                        <div class="row g-1">
-                            <div class="col-6">
-                                <input type="number" class="form-control form-control-sm" placeholder="Min"
-                                       @bind="minTempF" @bind:event="oninput" step="10" />
-                                <small class="text-muted">Min</small>
-                            </div>
-                            <div class="col-6">
-                                <input type="number" class="form-control form-control-sm" placeholder="Max"
-                                       @bind="maxTempF" @bind:event="oninput" step="10" />
-                                <small class="text-muted">Max</small>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="mb-2">
-                        <label class="form-label fw-bold mb-1" style="font-size:0.8rem;">Envelope Points</label>
-                        <input type="number" class="form-control form-control-sm"
-                               @bind="points" min="20" max="2000" step="10" />
-                        <small class="text-muted">More points = smoother</small>
-                    </div>
-
-                    <div class="mb-2">
                         <div class="d-flex align-items-center gap-2 mb-1">
                             <label class="form-label fw-bold mb-0" style="font-size:0.8rem;">Liquid Dropout (%)</label>
                             <div class="form-check form-switch mb-0">
@@ -79,6 +56,10 @@
                             <label class="form-check-label" for="d1">1% Liquid</label>
                         </div>
                         <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="d3" @bind="showDropout3" />
+                            <label class="form-check-label" for="d3">3% Liquid</label>
+                        </div>
+                        <div class="form-check">
                             <input class="form-check-input" type="checkbox" id="d5" @bind="showDropout5" />
                             <label class="form-check-label" for="d5">5% Liquid</label>
                         </div>
@@ -87,8 +68,8 @@
                             <label class="form-check-label" for="d10">10% Liquid</label>
                         </div>
                         <div class="form-check">
-                            <input class="form-check-input" type="checkbox" id="d25" @bind="showDropout25" />
-                            <label class="form-check-label" for="d25">25% Liquid</label>
+                            <input class="form-check-input" type="checkbox" id="d15" @bind="showDropout15" />
+                            <label class="form-check-label" for="d15">15% Liquid</label>
                         </div>
                     </div>
 
@@ -99,7 +80,7 @@
                             <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="LoadDryGas">Dry</button>
                             <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="LoadBlackOil">Oil</button>
                         </div>
-                        <div style="max-height:220px; overflow-y:auto; overflow-x:hidden;">
+                        <div style="max-height:280px; overflow-y:auto; overflow-x:hidden;">
                             @foreach (var comp in composition.ToList())
                             {
                                 <div class="row g-1 mb-1 align-items-center flex-nowrap">
@@ -162,6 +143,14 @@
                         <table class="table table-sm mb-0" style="font-size:0.8rem;">
                             <tbody>
                                 <tr><td><strong>Backend:</strong></td><td>@envelopeResult.Backend</td></tr>
+                                <tr>
+                                    <td><strong>Fluid Type:</strong></td>
+                                    <td>
+                                        <span class="badge @GetFluidBadgeClass(envelopeResult.FluidType)">
+                                            @CoolPropPhaseEnvelopeService.GetFluidLabel(envelopeResult.FluidType)
+                                        </span>
+                                    </td>
+                                </tr>
                                 <tr><td><strong>Bubble Pts:</strong></td><td>@envelopeResult.Bubble.Length</td></tr>
                                 <tr><td><strong>Dew Pts:</strong></td><td>@envelopeResult.Dew.Length</td></tr>
                                 @if (envelopeResult.Critical.HasValue)
@@ -180,24 +169,54 @@
         <!-- ── Right Panel ────────────────────────────────────────────────── -->
         <div class="col-auto">
             <div class="card shadow-sm">
-                <div class="card-header bg-secondary text-white py-2">
+                <div class="card-header bg-secondary text-white py-2 d-flex justify-content-between align-items-center">
                     <h6 class="mb-0"><i class="bi bi-graph-up-arrow"></i> Phase Envelope Diagram</h6>
+                    @if (envelopeResult != null)
+                    {
+                        <div class="d-flex gap-3" style="font-size:0.8rem;">
+                            <div class="form-check form-check-inline mb-0">
+                                <input class="form-check-input" type="checkbox" id="toggle-liq"
+                                       checked="@showLiquidLines"
+                                       @onchange="OnLiquidToggleHeaderChanged"
+                                       style="width:14px;height:14px;" />
+                                <label class="form-check-label text-white" for="toggle-liq"
+                                       style="font-size:0.8rem;">Liquid Dropout</label>
+                            </div>
+                            <div class="form-check form-check-inline mb-0">
+                                <input class="form-check-input" type="checkbox" id="toggle-retro"
+                                       checked="@showRetrogradeShading"
+                                       @onchange="OnRetrogradeToggleHeaderChanged"
+                                       style="width:14px;height:14px;" />
+                                <label class="form-check-label text-white" for="toggle-retro"
+                                       style="font-size:0.8rem;">Retrograde</label>
+                            </div>
+                            <div class="form-check form-check-inline mb-0">
+                                <input class="form-check-input" type="checkbox" id="toggle-theme"
+                                       checked="@useDarkMode"
+                                       @onchange="OnThemeToggleChanged"
+                                       style="width:14px;height:14px;" />
+                                <label class="form-check-label text-white" for="toggle-theme"
+                                       style="font-size:0.8rem;">
+                                    <i class="bi @(useDarkMode ? "bi-moon-fill" : "bi-sun-fill")"></i> @(useDarkMode ? "Dark" : "Light")
+                                </label>
+                            </div>
+                        </div>
+                    }
                 </div>
                 <div class="card-body p-2" style="position:relative;">
 
                     <PhaseEnvelopePlot @ref="_plotComponent"
                                        EnvelopeData="envelopeResult"
                                        ShowLiquidLines="@showLiquidLines"
-                                       ShowLiquidLinesChanged="@((val) => { showLiquidLines = val; StateHasChanged(); })"
                                        ShowRetrogradeShading="@showRetrogradeShading"
-                                       ShowRetrogradeShadingChanged="@((val) => { showRetrogradeShading = val; StateHasChanged(); })"
+                                       DarkMode="@useDarkMode"
                                        PlotWidth="1125"
                                        PlotHeight="620" />
 
                     @if (isCalculating)
                     {
                         <div style="position:absolute;inset:0;display:flex;align-items:center;
-                                                justify-content:center;background:rgba(255,255,255,0.85);z-index:10;">
+                                                                        justify-content:center;background:rgba(255,255,255,0.85);z-index:10;">
                             <div class="text-center">
                                 <div class="spinner-border text-primary"
                                      style="width:3rem;height:3rem;" role="status"></div>
@@ -209,7 +228,7 @@
                     @if (!string.IsNullOrEmpty(errorMessage))
                     {
                         <div style="position:absolute;inset:0;display:flex;align-items:center;
-                                                justify-content:center;background:rgba(255,255,255,0.95);z-index:10;">
+                                                                        justify-content:center;background:rgba(255,255,255,0.95);z-index:10;">
                             <div class="alert alert-danger m-3">
                                 <h6>Error</h6>
                                 <p class="mb-0">@errorMessage</p>
@@ -220,7 +239,7 @@
                     @if (envelopeResult == null && !isCalculating && string.IsNullOrEmpty(errorMessage))
                     {
                         <div style="position:absolute;inset:0;display:flex;align-items:center;
-                                                justify-content:center;background:rgba(255,255,255,0.95);z-index:10;"
+                                                                        justify-content:center;background:rgba(255,255,255,0.95);z-index:10;"
                              class="text-muted">
                             <div class="text-center">
                                 <i class="bi bi-graph-up" style="font-size:4rem;opacity:0.3;"></i>
@@ -277,15 +296,14 @@
     private const string BackendSRK = "SRK";
 
     private string selectedBackend = "PR";
-    private double minTempF = -250;
-    private double maxTempF = 500;
-    private int points = 1000;
     private bool showLiquidLines = true;
     private bool showRetrogradeShading = true;
+    private bool useDarkMode = false;
     private bool showDropout1 = true;
+    private bool showDropout3 = true;
     private bool showDropout5 = true;
     private bool showDropout10 = true;
-    private bool showDropout25 = true;
+    private bool showDropout15 = true;
     private Dictionary<string, double> composition = new();
     private readonly string[] availableComponents =
         ["C1", "C2", "C3", "iC4", "nC4", "iC5", "nC5", "C6", "C7", "C8", "C9", "C10", "CO2", "N2", "H2S"];
@@ -359,13 +377,48 @@
 
     private async Task OnDisplayToggleChanged()
     {
-        // Ensure Blazor has propagated the new ShowLiquidLines value
-        // to the child component before forcing a re-render.
         StateHasChanged();
         await Task.Yield();
         if (_plotComponent != null && envelopeResult != null)
             await _plotComponent.ForceRenderAsync();
     }
+
+    private async Task OnLiquidToggleHeaderChanged(ChangeEventArgs e)
+    {
+        showLiquidLines = (bool)(e.Value ?? false);
+        StateHasChanged();
+        await Task.Yield();
+        if (_plotComponent != null && envelopeResult != null)
+            await _plotComponent.ForceRenderAsync();
+    }
+
+    private async Task OnRetrogradeToggleHeaderChanged(ChangeEventArgs e)
+    {
+        showRetrogradeShading = (bool)(e.Value ?? false);
+        StateHasChanged();
+        await Task.Yield();
+        if (_plotComponent != null && envelopeResult != null)
+            await _plotComponent.ForceRenderAsync();
+    }
+
+    private async Task OnThemeToggleChanged(ChangeEventArgs e)
+    {
+        useDarkMode = (bool)(e.Value ?? false);
+        StateHasChanged();
+        await Task.Yield();
+        if (_plotComponent != null && envelopeResult != null)
+            await _plotComponent.ForceRenderAsync();
+    }
+
+    private static string GetFluidBadgeClass(CoolPropPhaseEnvelopeService.FluidClassification fluidType) => fluidType switch
+    {
+        CoolPropPhaseEnvelopeService.FluidClassification.DryGas => "bg-info text-dark",
+        CoolPropPhaseEnvelopeService.FluidClassification.WetGas => "bg-primary",
+        CoolPropPhaseEnvelopeService.FluidClassification.GasCondensate => "bg-warning text-dark",
+        CoolPropPhaseEnvelopeService.FluidClassification.VolatileOil => "bg-danger",
+        CoolPropPhaseEnvelopeService.FluidClassification.BlackOil => "bg-dark",
+        _ => "bg-secondary"
+    };
 
     private async Task GenerateEnvelope()
     {
@@ -377,18 +430,20 @@
         {
             var allFractions = new List<double>();
             if (showDropout1) allFractions.Add(0.01);
+            if (showDropout3) allFractions.Add(0.03);
             if (showDropout5) allFractions.Add(0.05);
             if (showDropout10) allFractions.Add(0.10);
-            if (showDropout25) allFractions.Add(0.25);
+            if (showDropout15) allFractions.Add(0.15);
 
             var fractions = allFractions.Count > 0
                 ? allFractions.ToArray()
-                : [0.01, 0.05, 0.10, 0.25];
+                : [0.01, 0.03, 0.05, 0.10, 0.15];
 
             envelopeResult = await Task.Run(() =>
                 EnvelopeService.GenerateEnvelopeOilfield(
                     selectedBackend, composition,
-                    minTempF, maxTempF, points, fractions));
+                    minTempF: -460, maxTempF: 1200,
+                    points: 1000, liquidFractions: fractions));
         }
         catch (Exception ex)
         {

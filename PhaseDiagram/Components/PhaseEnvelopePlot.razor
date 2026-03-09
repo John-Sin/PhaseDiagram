@@ -3,26 +3,6 @@
 
 <div style="position:relative; width:@(PlotWidth)px; height:@(PlotHeight)px;">
     <div id="@_chartId" style="width:@(PlotWidth)px; height:@(PlotHeight)px;"></div>
-
-    @if (EnvelopeData != null && EnvelopeData.LiquidLines.Count > 0)
-    {
-        <div style="position:absolute; top:8px; right:140px; z-index:5;
-                    background:rgba(255,255,255,0.9); border:1px solid #ccc;
-                    border-radius:4px; padding:4px 10px; font-size:0.8rem;">
-            <div class="form-check form-check-inline mb-0">
-                <input class="form-check-input" type="checkbox" id="@(_chartId + "-liq")"
-                       checked="@ShowLiquidLines"
-                       @onchange="OnLiquidToggleClicked" />
-                <label class="form-check-label" for="@(_chartId + "-liq")">Liquid Dropout</label>
-            </div>
-            <div class="form-check form-check-inline mb-0">
-                <input class="form-check-input" type="checkbox" id="@(_chartId + "-retro")"
-                       checked="@ShowRetrogradeShading"
-                       @onchange="OnRetrogradeToggleClicked" />
-                <label class="form-check-label" for="@(_chartId + "-retro")">Retrograde</label>
-            </div>
-        </div>
-    }
 </div>
 
 @code {
@@ -33,6 +13,8 @@
     [Parameter] public EventCallback<bool> ShowLiquidLinesChanged { get; set; }
     [Parameter] public bool ShowRetrogradeShading { get; set; } = true;
     [Parameter] public EventCallback<bool> ShowRetrogradeShadingChanged { get; set; }
+    [Parameter] public bool DarkMode { get; set; } = false;
+    [Parameter] public EventCallback<bool> DarkModeChanged { get; set; }
     [Parameter] public int PlotWidth { get; set; } = 1125;
     [Parameter] public int PlotHeight { get; set; } = 620;
 
@@ -40,6 +22,7 @@
     private CoolPropPhaseEnvelopeService.PhaseEnvelopeResult? _lastRendered;
     private bool _lastShowLiquid;
     private bool _lastShowRetrograde;
+    private bool _lastDarkMode;
 
     public class ReferencePoint
     {
@@ -52,25 +35,34 @@
 
     private sealed record TPoint(double t, double p);
     private sealed record TRefPoint(string label, double t, double p, string color, string symbol);
+    private sealed record TPolygon(double[] x, double[] y);
     private sealed record TPlotData(
         TPoint[] bubble,
         TPoint[] dew,
         TPoint? critical,
         Dictionary<string, TPoint[]> liquidLines,
         TRefPoint[] referencePoints,
-        bool showRetrograde);
+        bool showRetrograde,
+        bool darkMode,
+        double? xMin,
+        double? xMax,
+        double? yMax,
+        TPolygon? twoPhasePolygon,
+        TPolygon? retrogradePolygon);
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
         bool dataChanged = EnvelopeData != null && !ReferenceEquals(EnvelopeData, _lastRendered);
         bool toggleChanged = ShowLiquidLines != _lastShowLiquid
-                          || ShowRetrogradeShading != _lastShowRetrograde;
+                          || ShowRetrogradeShading != _lastShowRetrograde
+                          || DarkMode != _lastDarkMode;
 
         if (EnvelopeData != null && (dataChanged || toggleChanged))
         {
             _lastRendered = EnvelopeData;
             _lastShowLiquid = ShowLiquidLines;
             _lastShowRetrograde = ShowRetrogradeShading;
+            _lastDarkMode = DarkMode;
             await RenderChart();
         }
     }
@@ -79,22 +71,304 @@
     {
         _lastShowLiquid = ShowLiquidLines;
         _lastShowRetrograde = ShowRetrogradeShading;
+        _lastDarkMode = DarkMode;
         await RenderChart();
     }
 
-    private async Task OnLiquidToggleClicked(ChangeEventArgs e)
+    private (double? xMin, double? xMax, double? yMax) ComputeAxisRanges()
     {
-        ShowLiquidLines = (bool)(e.Value ?? false);
-        await ShowLiquidLinesChanged.InvokeAsync(ShowLiquidLines);
-        await ForceRenderAsync();
+        if (EnvelopeData == null)
+            return (null, null, null);
+
+        var allBub = EnvelopeData.Bubble;
+        var allDew = EnvelopeData.Dew;
+
+        if (allBub.Length == 0 && allDew.Length == 0)
+            return (null, null, null);
+
+        double maxT = double.MinValue;
+        double minT = double.MaxValue;
+        double maxP = double.MinValue;
+
+        foreach (var pt in allBub)
+        {
+            if (pt.T_F > maxT) maxT = pt.T_F;
+            if (pt.T_F < minT) minT = pt.T_F;
+            if (pt.P_psia > maxP) maxP = pt.P_psia;
+        }
+        foreach (var pt in allDew)
+        {
+            if (pt.T_F > maxT) maxT = pt.T_F;
+            if (pt.T_F < minT) minT = pt.T_F;
+            if (pt.P_psia > maxP) maxP = pt.P_psia;
+        }
+
+        if (maxT == double.MinValue) return (null, null, null);
+
+        double xMax = maxT + 100.0;
+        double xMin = minT - 20.0;
+        double yMax = maxP + 1000.0;
+
+        return (xMin, xMax, yMax);
     }
 
-    private async Task OnRetrogradeToggleClicked(ChangeEventArgs e)
+    #region Polygon Computation (C#)
+
+    private static List<double> AllTatP(TPoint[] pts, double p)
     {
-        ShowRetrogradeShading = (bool)(e.Value ?? false);
-        await ShowRetrogradeShadingChanged.InvokeAsync(ShowRetrogradeShading);
-        await ForceRenderAsync();
+        var results = new List<double>();
+        for (int i = 0; i < pts.Length - 1; i++)
+        {
+            double p0 = pts[i].p, p1 = pts[i + 1].p;
+            double pMin = Math.Min(p0, p1), pMax = Math.Max(p0, p1);
+            if (p < pMin || p > pMax) continue;
+            double denom = p1 - p0;
+            if (Math.Abs(denom) < 1e-10) continue;
+            double frac = (p - p0) / denom;
+            results.Add(pts[i].t + frac * (pts[i + 1].t - pts[i].t));
+        }
+        return results;
     }
+
+    private static TPolygon? BuildTwoPhasePolygon(TPoint[] bubble, TPoint[] dew, double pMax)
+    {
+        if (bubble.Length < 2 || dew.Length < 2) return null;
+
+        var all = bubble.Concat(dew);
+        double pLo = all.Min(pt => pt.p);
+        double pHi = Math.Min(all.Max(pt => pt.p), pMax);
+        if (pHi <= pLo) return null;
+
+        const int N = 300;
+        var leftT = new List<double>(); var leftP = new List<double>();
+        var rightT = new List<double>(); var rightP = new List<double>();
+
+        for (int i = 0; i <= N; i++)
+        {
+            double p = pLo + (pHi - pLo) * i / N;
+            var allTs = AllTatP(bubble, p).Concat(AllTatP(dew, p)).ToList();
+            if (allTs.Count < 2) continue;
+            double minT = allTs.Min(), maxT = allTs.Max();
+            if (maxT - minT < 0.01) continue;
+            leftT.Add(minT); leftP.Add(p);
+            rightT.Add(maxT); rightP.Add(p);
+        }
+
+        if (leftT.Count < 3) return null;
+
+        var polyX = new List<double>(leftT);
+        var polyY = new List<double>(leftP);
+        for (int k = rightT.Count - 1; k >= 0; k--)
+        {
+            polyX.Add(rightT[k]); polyY.Add(rightP[k]);
+        }
+        polyX.Add(polyX[0]); polyY.Add(polyY[0]);
+        return new TPolygon(polyX.ToArray(), polyY.ToArray());
+    }
+
+    /// <summary>
+    /// Build the retrograde condensation region polygon using a horizontal
+    /// pressure sweep — the same proven technique as BuildTwoPhasePolygon.
+    ///
+    /// The retrograde region lies:
+    ///   • Inside the phase envelope
+    ///   • Adjacent to the dew curve
+    ///   • Between the critical point and the cricondentherm
+    ///   • Bounded internally by the locus of maximum liquid dropout
+    ///
+    /// At each pressure level P (from Pcrit down to the cricondentherm pressure):
+    ///   Right boundary T = rightmost T on the dew curve (T >= Tcrit)
+    ///   Left boundary T  = the max-dropout locus T at that pressure
+    ///
+    /// Both boundaries converge at the cricondentherm point (max T on dew curve),
+    /// which is the explicit bottom vertex of the teardrop.
+    /// </summary>
+    private static TPolygon? BuildRetrogradePolygon(
+        TPoint[] bubble, TPoint[] dew, TPoint critical,
+        Dictionary<string, TPoint[]>? liquidLineData)
+    {
+        if (dew.Length < 5 || bubble.Length < 2) return null;
+
+        double tCrit = critical.t, pCrit = critical.p;
+
+        // ── Find the cricondentherm (maximum T on the dew curve) ──
+        double tCricondentherm = double.MinValue;
+        double pAtCricondentherm = 0;
+        foreach (var pt in dew)
+        {
+            if (pt.t > tCricondentherm)
+            {
+                tCricondentherm = pt.t;
+                pAtCricondentherm = pt.p;
+            }
+        }
+        if (tCricondentherm <= tCrit) return null;
+
+        // ── Collect dew curve points right of CP (T >= Tcrit) ──
+        var dewRight = dew.Where(pt => pt.t >= tCrit - 0.5).ToArray();
+        if (dewRight.Length < 3) return null;
+
+        // The sweep goes from Pcrit down to the cricondentherm pressure.
+        // This ensures the polygon's bottom vertex is at the cricondentherm.
+        double pHi = pCrit;
+        double pLo = pAtCricondentherm;
+        if (pHi - pLo < 1.0) return null;
+
+        // ── Build the max-dropout locus as a lookup: pressure → T ──
+        var locusLookup = BuildLocusLookup(
+            liquidLineData, bubble, dew, tCrit, pCrit, tCricondentherm, pAtCricondentherm);
+
+        // ── Horizontal pressure sweep ──
+        const int N = 200;
+        var leftT = new List<double>(); var leftP = new List<double>();
+        var rightT = new List<double>(); var rightP = new List<double>();
+
+        for (int i = 0; i <= N; i++)
+        {
+            double p = pHi - (pHi - pLo) * i / N;
+
+            // Right boundary: rightmost T on dew curve at this P, but only T >= Tcrit.
+            var dewTs = AllTatP(dewRight, p);
+            if (dewTs.Count == 0) continue;
+            double tRight = dewTs.Max();
+            if (tRight < tCrit + 0.1) continue;
+
+            // Left boundary: locus of max dropout at this P.
+            double tLeft = locusLookup(p);
+
+            // Ensure left < right with a minimum gap.
+            if (tLeft >= tRight - 0.5) tLeft = tRight - 0.5;
+
+            // Ensure left is at or right of Tcrit.
+            if (tLeft < tCrit) tLeft = tCrit;
+
+            // Only add if there's meaningful width.
+            if (tRight - tLeft < 0.3) continue;
+
+            leftT.Add(tLeft); leftP.Add(p);
+            rightT.Add(tRight); rightP.Add(p);
+        }
+
+        if (leftT.Count < 3) return null;
+
+        // ── Assemble polygon ──
+        var polyX = new List<double>(leftT.Count * 2 + 4);
+        var polyY = new List<double>(leftT.Count * 2 + 4);
+
+        // Left boundary: top (CP) to bottom.
+        for (int k = 0; k < leftT.Count; k++)
+        {
+            polyX.Add(leftT[k]);
+            polyY.Add(leftP[k]);
+        }
+
+        // Explicit bottom vertex at the cricondentherm.
+        // Both left and right converge here.
+        polyX.Add(tCricondentherm);
+        polyY.Add(pAtCricondentherm);
+
+        // Right boundary: bottom back to top (reverse order).
+        for (int k = rightT.Count - 1; k >= 0; k--)
+        {
+            polyX.Add(rightT[k]);
+            polyY.Add(rightP[k]);
+        }
+
+        // Close.
+        polyX.Add(polyX[0]);
+        polyY.Add(polyY[0]);
+
+        return new TPolygon(polyX.ToArray(), polyY.ToArray());
+    }
+
+    /// <summary>
+    /// Returns a function P → T that gives the locus of maximum liquid
+    /// dropout temperature at any pressure. This is the inner (left)
+    /// boundary of the retrograde region.
+    ///
+    /// When liquid contour data exists, the locus is built from the
+    /// turning points (max-T) of each contour, linearly interpolated.
+    /// Otherwise a synthetic locus is generated from the bubble/dew
+    /// curve geometry.
+    /// </summary>
+    private static Func<double, double> BuildLocusLookup(
+        Dictionary<string, TPoint[]>? liquidLineData,
+        TPoint[] bubble, TPoint[] dew,
+        double tCrit, double pCrit, double tCricondentherm, double pAtCricondentherm)
+    {
+        // ── Try to extract turning points from real liquid contours ──
+        var anchorPoints = new List<TPoint>();
+
+        if (liquidLineData != null && liquidLineData.Count >= 2)
+        {
+            foreach (var kvp in liquidLineData)
+            {
+                var pts = kvp.Value;
+                if (pts.Length < 3) continue;
+
+                // Turning point = max-T point on this contour.
+                TPoint maxTPt = pts[0];
+                for (int i = 1; i < pts.Length; i++)
+                {
+                    if (pts[i].t > maxTPt.t)
+                        maxTPt = pts[i];
+                }
+
+                // Only include if it's to the right of CP.
+                if (maxTPt.t > tCrit)
+                    anchorPoints.Add(maxTPt);
+            }
+        }
+
+        // Always anchor at CP (top) and cricondentherm (bottom).
+        anchorPoints.Add(new TPoint(tCrit, pCrit));
+        anchorPoints.Add(new TPoint(tCricondentherm, pAtCricondentherm));
+
+        // Sort by pressure descending (high P first).
+        anchorPoints.Sort((a, b) => b.p.CompareTo(a.p));
+
+        // Remove duplicate pressures.
+        var cleaned = new List<TPoint> { anchorPoints[0] };
+        for (int i = 1; i < anchorPoints.Count; i++)
+        {
+            if (Math.Abs(anchorPoints[i].p - cleaned[^1].p) > 0.1)
+                cleaned.Add(anchorPoints[i]);
+        }
+
+        if (cleaned.Count >= 3)
+        {
+            // We have enough real anchor points — build piecewise linear interpolator.
+            return (double p) =>
+            {
+                if (p >= cleaned[0].p) return cleaned[0].t;
+                if (p <= cleaned[^1].p) return cleaned[^1].t;
+
+                for (int i = 0; i < cleaned.Count - 1; i++)
+                {
+                    double pH = cleaned[i].p, pL = cleaned[i + 1].p;
+                    if (p <= pH && p >= pL)
+                    {
+                        double frac = (pH - p) / (pH - pL);
+                        return cleaned[i].t + frac * (cleaned[i + 1].t - cleaned[i].t);
+                    }
+                }
+                return tCrit;
+            };
+        }
+
+        // ── Fallback: synthetic locus ──
+        double pRange = pCrit - pAtCricondentherm;
+        return (double p) =>
+        {
+            if (pRange <= 0) return tCrit;
+            double normalizedDrop = Math.Clamp((pCrit - p) / pRange, 0, 1);
+
+            double tLocus = tCrit + Math.Pow(normalizedDrop, 0.55) * (tCricondentherm - tCrit);
+            return tLocus;
+        };
+    }
+
+    #endregion
 
     private async Task RenderChart()
     {
@@ -112,18 +386,58 @@
             }
         }
 
+        var (xMin, xMax, yMax) = ComputeAxisRanges();
+
+        var bubble = EnvelopeData.Bubble.Select(p => new TPoint(p.T_F, p.P_psia)).ToArray();
+        var dew = EnvelopeData.Dew.Select(p => new TPoint(p.T_F, p.P_psia)).ToArray();
+        TPoint? critical = EnvelopeData.Critical.HasValue
+            ? new TPoint(EnvelopeData.Critical.Value.Tcrit_F, EnvelopeData.Critical.Value.Pcrit_psia)
+            : null;
+
+        TPolygon? twoPhasePoly = null;
+        TPolygon? retroPoly = null;
+
+        if (bubble.Length > 1 && dew.Length > 1)
+        {
+            double pCap = critical != null ? critical.p * 1.02 : double.MaxValue;
+            twoPhasePoly = BuildTwoPhasePolygon(bubble, dew, pCap);
+        }
+
+        // Always generate liquid line TPoints for retrograde polygon computation,
+        // even when not displaying them. This gives us actual turning points.
+        Dictionary<string, TPoint[]>? retroLiquidData = null;
+        if (ShowRetrogradeShading && critical != null && EnvelopeData.LiquidLines.Count > 0)
+        {
+            retroLiquidData = new Dictionary<string, TPoint[]>();
+            foreach (var kvp in EnvelopeData.LiquidLines)
+            {
+                string key = kvp.Key.ToString("G17");
+                retroLiquidData[key] = kvp.Value
+                    .Select(p => new TPoint(p.T_F, p.P_psia))
+                    .ToArray();
+            }
+        }
+
+        if (ShowRetrogradeShading && critical != null && dew.Length > 4)
+        {
+            retroPoly = BuildRetrogradePolygon(bubble, dew, critical, retroLiquidData);
+        }
+
         var plotData = new TPlotData(
-            bubble: EnvelopeData.Bubble.Select(p => new TPoint(p.T_F, p.P_psia)).ToArray(),
-            dew: EnvelopeData.Dew.Select(p => new TPoint(p.T_F, p.P_psia)).ToArray(),
-            critical: EnvelopeData.Critical.HasValue
-                ? new TPoint(EnvelopeData.Critical.Value.Tcrit_F,
-                             EnvelopeData.Critical.Value.Pcrit_psia)
-                : null,
+            bubble: bubble,
+            dew: dew,
+            critical: critical,
             liquidLines: liquidLines,
             referencePoints: ReferencePoints?
                 .Select(rp => new TRefPoint(rp.Label, rp.Temperature, rp.Pressure, rp.Color, rp.Symbol))
                 .ToArray() ?? [],
-            showRetrograde: ShowRetrogradeShading
+            showRetrograde: ShowRetrogradeShading,
+            darkMode: DarkMode,
+            xMin: xMin,
+            xMax: xMax,
+            yMax: yMax,
+            twoPhasePolygon: twoPhasePoly,
+            retrogradePolygon: retroPoly
         );
 
         await JSRuntime.InvokeVoidAsync("phaseEnvelopePlot.render",

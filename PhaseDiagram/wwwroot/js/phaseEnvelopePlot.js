@@ -6,7 +6,7 @@
         if (!data) { console.warn('[PhasePlot] null data'); return; }
 
         var traces = this._buildTraces(data);
-        var layout = this._buildLayout(width, height);
+        var layout = this._buildLayout(width, height, data);
         var config = this._buildConfig();
 
         var iframe = container.querySelector('iframe');
@@ -36,36 +36,134 @@
         }
     },
 
-    _buildLayout: function (width, height) {
+    _getTheme: function (dark) {
+        if (dark) {
+            return {
+                plotBg: '#2A2A2A',
+                paperBg: '#1E1E1E',
+                gridColor: '#444',
+                gridOpacity: 0.5,
+                gridWidth: 0.6,
+                lineColor: '#666',
+                fontColor: '#E6E6E6',
+                tickColor: '#E6E6E6',
+                legendBg: 'rgba(30,30,30,0.92)',
+                legendBorder: '#444',
+                twoPhaseFill: 'rgba(88, 91, 112, 0.30)',
+                retroFill: 'rgba(249, 226, 175, 0.22)',
+                retroLine: 'rgba(249, 226, 175, 0.35)',
+                annotBg: 'rgba(30,30,30,0.90)',
+                annotBorder: '#444',
+                annotFont: '#E6E6E6',
+                borderColor: '#444',
+                bubbleColor: '#FF6B6B',
+                dewColor: '#4EA8DE'
+            };
+        }
         return {
+            plotBg: '#ECEFF3',
+            paperBg: '#ECEFF3',
+            gridColor: '#D8DCE3',
+            gridOpacity: 0.5,
+            gridWidth: 0.6,
+            lineColor: '#666',
+            fontColor: '#2C2C2C',
+            tickColor: '#444',
+            legendBg: 'rgba(255,255,255,0.85)',
+            legendBorder: '#D0D4DA',
+            twoPhaseFill: 'rgba(210, 210, 210, 0.35)',
+            retroFill: 'rgba(216, 207, 168, 0.35)',
+            retroLine: 'rgba(216, 207, 168, 0.45)',
+            annotBg: 'rgba(255,255,255,0.85)',
+            annotBorder: '#D0D4DA',
+            annotFont: '#2C2C2C',
+            borderColor: '#C8CDD6',
+            bubbleColor: '#C94F4F',
+            dewColor: '#2E6DA4'
+        };
+    },
+
+    _buildLayout: function (width, height, data) {
+        var theme = this._getTheme(data && data.darkMode);
+
+        var layout = {
             width: width,
             height: height,
             autosize: false,
-            margin: { l: 70, r: 25, t: 30, b: 60, pad: 4 },
+            margin: { l: 72, r: 25, t: 30, b: 62, pad: 4 },
             xaxis: {
-                title: 'Temperature (\u00B0F)',
-                gridcolor: '#e6e6e6', showline: true, linewidth: 1,
-                linecolor: '#aaa', mirror: true, zeroline: false, ticks: 'outside'
+                title: { text: 'Temperature (\u00B0F)', font: { size: 14, color: theme.fontColor } },
+                gridcolor: theme.gridColor, gridwidth: theme.gridWidth,
+                showline: true, linewidth: 1, linecolor: theme.borderColor,
+                mirror: true, zeroline: false, ticks: 'outside',
+                tickfont: { size: 12, color: theme.tickColor }
             },
             yaxis: {
-                title: 'Pressure (psia)',
-                gridcolor: '#e6e6e6', showline: true, linewidth: 1,
-                linecolor: '#aaa', mirror: true, zeroline: false,
-                rangemode: 'tozero', ticks: 'outside'
+                title: { text: 'Pressure (psia)', font: { size: 14, color: theme.fontColor } },
+                gridcolor: theme.gridColor, gridwidth: theme.gridWidth,
+                showline: true, linewidth: 1, linecolor: theme.borderColor,
+                mirror: true, zeroline: false, rangemode: 'tozero',
+                ticks: 'outside', tickfont: { size: 12, color: theme.tickColor }
             },
-            plot_bgcolor: 'rgb(250,250,250)',
-            paper_bgcolor: 'white',
+            plot_bgcolor: theme.plotBg,
+            paper_bgcolor: theme.paperBg,
             hovermode: 'closest',
             showlegend: true,
             legend: {
                 orientation: 'v',
                 x: 0.01, xanchor: 'left',
                 y: 0.99, yanchor: 'top',
-                bgcolor: 'rgba(255,255,255,0.88)',
-                bordercolor: '#ccc', borderwidth: 1,
-                font: { size: 11 }
-            }
+                bgcolor: theme.legendBg,
+                bordercolor: theme.legendBorder, borderwidth: 1,
+                font: { size: 12, color: theme.fontColor }
+            },
+            title: {
+                font: { size: 18, color: theme.fontColor }
+            },
+            annotations: []
         };
+
+        if (data) {
+            if (data.xMin != null && data.xMax != null) {
+                layout.xaxis.range = [data.xMin, data.xMax];
+            }
+            if (data.yMax != null) {
+                layout.yaxis.range = [0, data.yMax];
+            }
+        }
+
+        // ── Critical point label box above the CP marker ──
+        if (data && data.critical) {
+            var ct = this._T(data.critical);
+            var cp = this._P(data.critical);
+            if (ct !== undefined && cp !== undefined) {
+                layout.annotations.push({
+                    x: ct,
+                    y: cp,
+                    xref: 'x',
+                    yref: 'y',
+                    text: '<b>Critical Point</b><br>'
+                        + 'T<sub>c</sub> = ' + ct.toFixed(1) + ' \u00B0F<br>'
+                        + 'P<sub>c</sub> = ' + cp.toFixed(0) + ' psia',
+                    showarrow: false,
+                    ax: 0,
+                    ay: -108,
+                    bordercolor: theme.annotBorder,
+                    borderwidth: 1.5,
+                    borderpad: 6,
+                    bgcolor: theme.annotBg,
+                    font: {
+                        size: 11,
+                        color: theme.annotFont
+                    },
+                    align: 'center',
+                    yshift: 108
+                });
+            }
+        }
+
+
+        return layout;
     },
 
     _buildConfig: function () {
@@ -81,94 +179,78 @@
         };
     },
 
-    _sortedMono: function (pts) {
-        if (!pts || pts.length === 0) return [];
-        var sorted = pts.slice().sort(function (a, b) { return a.t - b.t; });
-        var out = [sorted[0]];
-        for (var i = 1; i < sorted.length; i++) {
-            if (sorted[i].t > out[out.length - 1].t) out.push(sorted[i]);
-        }
-        return out;
+    _T: function (pt) {
+        if (pt.t !== undefined) return pt.t;
+        if (pt.T !== undefined) return pt.T;
+        return undefined;
     },
-
-    _lerpP: function (curve, t) {
-        if (curve.length === 0) return null;
-        if (t < curve[0].t || t > curve[curve.length - 1].t) return null;
-        if (curve.length === 1) return curve[0].p;
-        for (var i = 0; i < curve.length - 1; i++) {
-            if (t >= curve[i].t && t <= curve[i + 1].t) {
-                var f = (t - curve[i].t) / (curve[i + 1].t - curve[i].t);
-                return curve[i].p + f * (curve[i + 1].p - curve[i].p);
-            }
-        }
-        return curve[curve.length - 1].p;
+    _P: function (pt) {
+        if (pt.p !== undefined) return pt.p;
+        if (pt.P !== undefined) return pt.P;
+        return undefined;
     },
 
     _buildTraces: function (data) {
         var traces = [];
         var self = this;
+        var theme = this._getTheme(data && data.darkMode);
 
-        // ── Retrograde shading ──
-        if (data.showRetrograde && data.critical &&
-            data.dew.length > 1 && data.bubble.length > 1) {
-            var tCrit = data.critical.t;
-            var bubMono = this._sortedMono(data.bubble);
-            var dewMono = this._sortedMono(data.dew);
-            var tLo = Math.max(tCrit, bubMono[0].t, dewMono[0].t);
-            var tHi = Math.min(bubMono[bubMono.length - 1].t, dewMono[dewMono.length - 1].t);
-            if (tHi > tLo + 0.1) {
-                var N = 200, step = (tHi - tLo) / (N - 1);
-                var polyX = [], polyY = [];
-                for (var i = 0; i < N; i++) {
-                    var t = tLo + i * step;
-                    var pBub = self._lerpP(bubMono, t);
-                    if (pBub !== null) { polyX.push(t); polyY.push(pBub); }
-                }
-                for (var j = N - 1; j >= 0; j--) {
-                    var t2 = tLo + j * step;
-                    var pDew = self._lerpP(dewMono, t2);
-                    if (pDew !== null) { polyX.push(t2); polyY.push(pDew); }
-                }
-                if (polyX.length > 4) {
-                    polyX.push(polyX[0]); polyY.push(polyY[0]);
-                    traces.push({
-                        x: polyX, y: polyY, type: 'scatter', mode: 'none',
-                        fill: 'toself', fillcolor: 'rgba(255,200,100,0.25)',
-                        line: { color: 'rgba(0,0,0,0)', width: 0 },
-                        name: 'Retrograde Region', showlegend: true, hoverinfo: 'skip'
-                    });
-                }
-            }
+        // ── Two-phase region shading (pre-computed in C#) ──
+        var tp = data.twoPhasePolygon;
+        if (tp && tp.x && tp.x.length > 2) {
+            traces.push({
+                x: tp.x, y: tp.y,
+                type: 'scatter', mode: 'none',
+                fill: 'toself',
+                fillcolor: theme.twoPhaseFill,
+                line: { color: 'rgba(0,0,0,0)', width: 0 },
+                name: 'Two-Phase Region',
+                showlegend: false,
+                hoverinfo: 'skip'
+            });
+        }
+
+        // ── Retrograde region shading (pre-computed in C#) ──
+        var rp = data.retrogradePolygon;
+        if (data.showRetrograde && rp && rp.x && rp.x.length > 2) {
+            traces.push({
+                x: rp.x, y: rp.y,
+                type: 'scatter', mode: 'none',
+                fill: 'toself',
+                fillcolor: theme.retroFill,
+                line: { color: theme.retroLine, width: 0.5 },
+                name: 'Retrograde Region',
+                showlegend: true,
+                hoverinfo: 'skip'
+            });
         }
 
         // ── Bubble curve ──
-        var bubbleX = data.bubble.map(function (p) { return p.t; });
-        var bubbleY = data.bubble.map(function (p) { return p.p; });
-        if (bubbleX.length > 0) {
+        if (data.bubble && data.bubble.length > 0) {
             traces.push({
-                x: bubbleX, y: bubbleY, mode: 'lines', type: 'scatter',
+                x: data.bubble.map(function (p) { return self._T(p); }),
+                y: data.bubble.map(function (p) { return self._P(p); }),
+                mode: 'lines', type: 'scatter',
                 name: 'Bubble Point (Q=0)', connectgaps: true,
-                line: { color: 'rgb(214,39,40)', width: 2.5, shape: 'spline', smoothing: 0.8 }
+                line: { color: theme.bubbleColor, width: 3, shape: 'spline', smoothing: 0.8 }
             });
         }
 
         // ── Dew curve ──
-        var dewX = data.dew.map(function (p) { return p.t; });
-        var dewY = data.dew.map(function (p) { return p.p; });
-        if (dewX.length > 0) {
+        if (data.dew && data.dew.length > 0) {
             traces.push({
-                x: dewX, y: dewY, mode: 'lines', type: 'scatter',
+                x: data.dew.map(function (p) { return self._T(p); }),
+                y: data.dew.map(function (p) { return self._P(p); }),
+                mode: 'lines', type: 'scatter',
                 name: 'Dew Point (Q=1)', connectgaps: true,
-                line: { color: 'rgb(31,119,180)', width: 2.5, shape: 'spline', smoothing: 0.8 }
+                line: { color: theme.dewColor, width: 3, shape: 'spline', smoothing: 0.8 }
             });
         }
 
         // ── Liquid dropout contours ──
-        // Data is geometrically interpolated between bubble and dew on the
-        // server — already perfectly smooth, correctly ordered, and inside
-        // the envelope. No JS post-processing needed.
-        var dropoutColors = ['#2ca02c', '#ff7f0e', '#d62728', '#9467bd',
-            '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22'];
+        var dropoutColors = data.darkMode
+            ? ['#66bb6a', '#ffb74d', '#ef5350', '#ce93d8', '#a1887f', '#f06292', '#90a4ae', '#dce775']
+            : ['#5B9F50', '#E6A23C', '#D9534F', '#7E57C2', '#6D4C41', '#c2185b', '#546e7a', '#9e9d24'];
         var ci = 0;
 
         if (data.liquidLines && typeof data.liquidLines === 'object') {
@@ -182,13 +264,13 @@
                 var pct = (parseFloat(lf) * 100).toFixed(0);
 
                 traces.push({
-                    x: pts.map(function (p) { return p.t; }),
-                    y: pts.map(function (p) { return p.p; }),
+                    x: pts.map(function (p) { return self._T(p); }),
+                    y: pts.map(function (p) { return self._P(p); }),
                     mode: 'lines', type: 'scatter',
                     name: pct + '% Liquid', connectgaps: true,
                     line: {
                         color: dropoutColors[ci++ % dropoutColors.length],
-                        width: 2, dash: 'dash',
+                        width: 2.2, dash: 'dash',
                         shape: 'spline', smoothing: 1.0
                     }
                 });
@@ -197,31 +279,34 @@
 
         // ── Critical point marker ──
         if (data.critical) {
+            var ct = self._T(data.critical), cp = self._P(data.critical);
             traces.push({
-                x: [data.critical.t], y: [data.critical.p],
+                x: [ct], y: [cp],
                 mode: 'markers', type: 'scatter', name: 'Critical Point',
                 marker: {
-                    size: 13, color: 'rgb(44,160,44)', symbol: 'star',
-                    line: { color: 'rgb(0,80,0)', width: 1.5 }
+                    size: 14, color: data.darkMode ? 'rgb(102,255,102)' : 'rgb(34,139,34)', symbol: 'star',
+                    line: { color: data.darkMode ? 'rgb(200,255,200)' : 'rgb(0,60,0)', width: 2 }
                 },
-                hovertemplate: '<b>Critical Point</b><br>T: ' + data.critical.t.toFixed(1) +
-                    ' \u00B0F<br>P: ' + data.critical.p.toFixed(0) + ' psia<extra></extra>'
+                hovertemplate: '<b>Critical Point</b><br>T: ' + ct.toFixed(1) +
+                    ' \u00B0F<br>P: ' + cp.toFixed(0) + ' psia<extra></extra>'
             });
         }
 
         // ── Reference points ──
         if (data.referencePoints && data.referencePoints.length > 0) {
             data.referencePoints.forEach(function (rp) {
+                var rt = self._T(rp), rpp = self._P(rp);
                 traces.push({
-                    x: [rp.t], y: [rp.p], mode: 'markers+text', type: 'scatter',
+                    x: [rt], y: [rpp], mode: 'markers+text', type: 'scatter',
                     name: rp.label,
                     marker: {
                         size: 12, color: rp.color, symbol: rp.symbol,
-                        line: { color: 'black', width: 1 }
+                        line: { color: data.darkMode ? 'white' : 'black', width: 1 }
                     },
                     text: [rp.label], textposition: 'top center',
-                    hovertemplate: '<b>' + rp.label + '</b><br>T: ' + rp.t.toFixed(1) +
-                        ' \u00B0F<br>P: ' + rp.p.toFixed(0) + ' psia<extra></extra>'
+                    textfont: { color: theme.fontColor },
+                    hovertemplate: '<b>' + rp.label + '</b><br>T: ' + rt.toFixed(1) +
+                        ' \u00B0F<br>P: ' + rpp.toFixed(0) + ' psia<extra></extra>'
                 });
             });
         }

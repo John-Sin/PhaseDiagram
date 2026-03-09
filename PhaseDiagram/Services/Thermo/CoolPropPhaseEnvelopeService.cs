@@ -10,8 +10,13 @@
 ///   T(LF, P) = Tdew(P) + LF^α × (Tbubble(P) − Tdew(P))
 ///
 /// where α is a power-law exponent that controls the spacing of contours.
-/// α = 0.5 compresses lines toward the dew curve (correct for lean gas);
-/// the contours converge naturally to the critical point where Tbub = Tdew.
+/// The exponent is selected automatically based on the fluid classification:
+///
+///   Dry Gas        → α = 0.90  (contours hug the dew curve)
+///   Wet Gas        → α = 0.85
+///   Gas Condensate → α = 0.75
+///   Volatile Oil   → α = 0.55
+///   Black Oil      → α = 0.80
 ///
 /// This approach:
 ///   • Makes ZERO CoolProp flash calls for dropout lines
@@ -33,7 +38,156 @@ public sealed class CoolPropPhaseEnvelopeService
         (double T_F, double P_psia)[] Dew,
         Dictionary<double, (double T_F, double P_psia)[]> LiquidLines,
         (double Tcrit_F, double Pcrit_psia)? Critical,
-        string Backend, string[] Components, double[] Composition);
+        string Backend, string[] Components, double[] Composition,
+        FluidClassification FluidType);
+
+    #endregion
+
+    #region Fluid Classification
+
+    /// <summary>
+    /// Reservoir fluid classification based on composition characteristics.
+    /// Determines the interpolation exponent for liquid dropout contours.
+    /// </summary>
+    public enum FluidClassification
+    {
+        /// <summary>C1 ≥ 90%, C7+ &lt; 1%. Essentially no liquid dropout in reservoir.</summary>
+        DryGas,
+
+        /// <summary>C1 ≥ 85%, C7+ 1–3%. Liquid drops out at surface, not in reservoir.</summary>
+        WetGas,
+
+        /// <summary>C1 60–85%, C7+ 3–12%. Retrograde condensation in reservoir.</summary>
+        GasCondensate,
+
+        /// <summary>C1 40–60%, C7+ 12–25%. Near-critical, high shrinkage oil.</summary>
+        VolatileOil,
+
+        /// <summary>C1 &lt; 40%, C7+ &gt; 25%. Low GOR, conventional oil.</summary>
+        BlackOil
+    }
+
+    /// <summary>
+    /// Power-law exponents for each fluid classification.
+    ///
+    /// The weight is w = LF^α, where LF is the liquid mole fraction
+    /// and w is the fractional distance from the dew curve toward
+    /// the bubble curve.
+    ///
+    /// Physical basis:
+    ///   • Gas systems (dry/wet/condensate): liquid dropout is the
+    ///     relevant phenomenon. Low LF contours should hug the dew
+    ///     curve → large α.
+    ///   • Oil systems (volatile/black): liquid dropout contours are
+    ///     less physically meaningful — the natural process is gas
+    ///     liberation from the bubble side. However, for display
+    ///     purposes, low LF still represents an extreme (nearly all
+    ///     vaporized) state near the dew curve → large α.
+    ///   • Volatile oil is the transitional case near the critical
+    ///     point where liquid and vapor properties converge, so
+    ///     contours spread more evenly → moderate α.
+    ///
+    /// For LF = 0.01 (1% liquid), the contour position is:
+    ///   DryGas:        1%^0.90 =  1.3%  from dew
+    ///   WetGas:        1%^0.85 =  2.2%  from dew
+    ///   GasCondensate: 1%^0.75 =  3.5%  from dew
+    ///   VolatileOil:   1%^0.55 =  8.9%  from dew
+    ///   BlackOil:      1%^0.80 =  2.5%  from dew
+    /// </summary>
+    private static double GetInterpolationExponent(FluidClassification classification) => classification switch
+    {
+        FluidClassification.DryGas => 0.90,
+        FluidClassification.WetGas => 0.85,
+        FluidClassification.GasCondensate => 0.75,
+        FluidClassification.VolatileOil => 0.55,
+        FluidClassification.BlackOil => 0.80,
+        _ => 0.75
+    };
+    /// <summary>
+    /// Classifies the reservoir fluid based on normalized mole fractions.
+    ///
+    /// Uses two primary discriminators:
+    ///   1. C1 (methane) mole fraction — controls gas vs oil character
+    ///   2. C7+ mole fraction (sum of C7 through C10+) — controls heaviness
+    ///
+    /// Classification boundaries are based on standard petroleum engineering
+    /// criteria (McCain, Whitson &amp; Brulé, etc.):
+    ///
+    ///   Dry Gas:        C1 ≥ 0.90 and C7+ &lt; 0.01
+    ///   Wet Gas:        C1 ≥ 0.85 and C7+ &lt; 0.035
+    ///   Gas Condensate: C1 ≥ 0.60 and C7+ &lt; 0.125
+    ///   Volatile Oil:   C1 ≥ 0.40 and C7+ &lt; 0.25
+    ///   Black Oil:      everything else (heavy, high C7+)
+    /// </summary>
+    public static FluidClassification ClassifyFluid(string[] components, double[] z)
+    {
+        if (components.Length != z.Length || z.Length == 0)
+            return FluidClassification.GasCondensate; // Safe default
+
+        // Normalize
+        double sum = z.Sum();
+        if (sum <= 0) return FluidClassification.GasCondensate;
+
+        // Map component names and accumulate key fractions.
+        double zC1 = 0;
+        double zC7Plus = 0;
+
+        for (int i = 0; i < components.Length; i++)
+        {
+            double zi = z[i] / sum;
+            string comp = components[i].Trim();
+
+            if (IsC1(comp))
+                zC1 += zi;
+            else if (IsC7Plus(comp))
+                zC7Plus += zi;
+        }
+
+        // Classification logic — ordered from lightest to heaviest.
+        if (zC1 >= 0.90 && zC7Plus < 0.01)
+            return FluidClassification.DryGas;
+
+        if (zC1 >= 0.85 && zC7Plus < 0.035)
+            return FluidClassification.WetGas;
+
+        if (zC1 >= 0.60 && zC7Plus < 0.125)
+            return FluidClassification.GasCondensate;
+
+        if (zC1 >= 0.40 && zC7Plus < 0.25)
+            return FluidClassification.VolatileOil;
+
+        return FluidClassification.BlackOil;
+    }
+
+    private static bool IsC1(string comp) =>
+        comp.Equals("C1", StringComparison.OrdinalIgnoreCase) ||
+        comp.Equals("Methane", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Returns true for C7 and heavier components (heptane, octane, nonane, decane).
+    /// </summary>
+    private static bool IsC7Plus(string comp) =>
+        comp switch
+        {
+            "C7" or "nC7" or "n-C7" or "Heptane" or "n-Heptane" => true,
+            "C8" or "nC8" or "n-C8" or "Octane" or "n-Octane" => true,
+            "C9" or "nC9" or "n-C9" or "Nonane" or "n-Nonane" => true,
+            "C10" or "nC10" or "n-C10" or "Decane" or "n-Decane" => true,
+            _ => false
+        };
+
+    /// <summary>
+    /// Returns a human-readable label for the fluid classification.
+    /// </summary>
+    public static string GetFluidLabel(FluidClassification classification) => classification switch
+    {
+        FluidClassification.DryGas => "Dry Gas",
+        FluidClassification.WetGas => "Wet Gas",
+        FluidClassification.GasCondensate => "Gas Condensate",
+        FluidClassification.VolatileOil => "Volatile Oil",
+        FluidClassification.BlackOil => "Black Oil",
+        _ => "Unknown"
+    };
 
     #endregion
 
@@ -46,15 +200,6 @@ public sealed class CoolPropPhaseEnvelopeService
 
     /// <summary>Number of pressure levels for dropout contour interpolation.</summary>
     private const int ContourPressureLevels = 200;
-
-    /// <summary>
-    /// Power-law exponent for dropout line interpolation.
-    /// Controls how contours are spaced between bubble and dew.
-    /// α &lt; 1 compresses toward dew (correct for most hydrocarbon mixtures).
-    /// α = 1 gives linear spacing.
-    /// α &gt; 1 compresses toward bubble.
-    /// </summary>
-    private const double InterpolationExponent = 0.5;
 
     /// <summary>
     /// Pressure ceiling for contours, as a fraction of Pcrit.
@@ -139,12 +284,17 @@ public sealed class CoolPropPhaseEnvelopeService
         double tMinK = FahrenheitToKelvin(request.TminF);
         double tMaxK = FahrenheitToKelvin(request.TmaxF);
 
+        // Classify fluid type from the original (unmapped) component names.
+        var fluidType = ClassifyFluid(request.Components, request.Z);
+        double alpha = GetInterpolationExponent(fluidType);
+        Console.WriteLine($"[PhaseEnvelope] Fluid classified as {GetFluidLabel(fluidType)} (α={alpha:F2}).");
+
         var (bubK, dewK, critK) = TraceEnvelope(comps, z, tMinK, tMaxK, request.Backend);
 
         if (bubK.Length == 0 && dewK.Length == 0)
             Console.WriteLine($"[PhaseEnvelope] WARNING: No points for {string.Join("+", comps)} / {request.Backend}.");
 
-        var liqLines = GenerateLiquidContours(bubK, dewK, critK, request.LiquidLines);
+        var liqLines = GenerateLiquidContours(bubK, dewK, critK, request.LiquidLines, alpha);
 
         return new PhaseEnvelopeResult(
             Bubble: ToFieldUnits(bubK),
@@ -155,7 +305,8 @@ public sealed class CoolPropPhaseEnvelopeService
                 : null,
             Backend: request.Backend,
             Components: comps,
-            Composition: z);
+            Composition: z,
+            FluidType: fluidType);
     }
 
     public PhaseEnvelopeResult GenerateEnvelopeOilfield(
@@ -163,7 +314,7 @@ public sealed class CoolPropPhaseEnvelopeService
         double minTempF = -150, double maxTempF = 350,
         int points = 50, double[]? liquidFractions = null)
     {
-        liquidFractions ??= [0.01, 0.05, 0.10, 0.25];
+        liquidFractions ??= [0.01, 0.03, 0.05, 0.10, 0.15];
         return GeneratePhaseEnvelope(new PhaseEnvelopeRequest(
             backend, composition.Keys.ToArray(), composition.Values.ToArray(),
             minTempF, maxTempF, points, liquidFractions));
@@ -208,9 +359,8 @@ public sealed class CoolPropPhaseEnvelopeService
     /// LF = 0 → on the dew curve (0% liquid, all vapor)
     /// LF = 1 → on the bubble curve (100% liquid)
     ///
-    /// The power-law exponent α controls spacing:
-    ///   α = 0.5 → √LF → lines compressed toward dew (physically reasonable)
-    ///   α = 1.0 → linear interpolation
+    /// The power-law exponent α is determined by the fluid classification
+    /// and controls how contours are spaced between bubble and dew.
     ///
     /// All contours converge naturally to the critical point where
     /// Tbubble = Tdew, producing the characteristic "fan" shape.
@@ -219,7 +369,8 @@ public sealed class CoolPropPhaseEnvelopeService
         (double T_K, double P_Pa)[] bubble,
         (double T_K, double P_Pa)[] dew,
         (double T_K, double P_Pa)? critical,
-        double[] liquidFractions)
+        double[] liquidFractions,
+        double alpha)
     {
         var result = new Dictionary<double, (double T_K, double P_Pa)[]>();
 
@@ -253,7 +404,7 @@ public sealed class CoolPropPhaseEnvelopeService
             if (lf <= 0 || lf >= 1) continue;
 
             // Power-law weight: how far from dew toward bubble.
-            double w = Math.Pow(lf, InterpolationExponent);
+            double w = Math.Pow(lf, alpha);
 
             var pts = new List<(double T_K, double P_Pa)>();
 
@@ -281,7 +432,7 @@ public sealed class CoolPropPhaseEnvelopeService
             if (pts.Count >= 3)
             {
                 result[lf] = pts.ToArray();
-                Console.WriteLine($"[LiquidContours] LF={lf:P0}: {pts.Count} pts (geometric interpolation).");
+                Console.WriteLine($"[LiquidContours] LF={lf:P0}: {pts.Count} pts (α={alpha:F2}).");
             }
         }
 
