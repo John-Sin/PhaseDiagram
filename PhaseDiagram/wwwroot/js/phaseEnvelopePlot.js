@@ -13,12 +13,15 @@
         if (!iframe) {
             iframe = document.createElement('iframe');
             iframe.src = 'plotly-frame.html';
-            iframe.style.width = width + 'px';
+            iframe.style.width = '100%';
             iframe.style.height = height + 'px';
             iframe.style.border = 'none';
             iframe.style.display = 'block';
             container.innerHTML = '';
             container.appendChild(iframe);
+        } else {
+            iframe.style.width = '100%';
+            iframe.style.height = height + 'px';
         }
 
         var doRender = function () {
@@ -87,9 +90,8 @@
         var theme = this._getTheme(data && data.darkMode);
 
         var layout = {
-            width: width,
+            autosize: true,
             height: height,
-            autosize: false,
             margin: { l: 72, r: 25, t: 30, b: 62, pad: 4 },
             xaxis: {
                 title: { text: 'Temperature (\u00B0F)', font: { size: 14, color: theme.fontColor } },
@@ -162,13 +164,35 @@
             }
         }
 
+        // ── Note below legend when liquid dropout lines are shown ──
+        if (data && data.liquidLines && Object.keys(data.liquidLines).length > 0) {
+            layout.annotations.push({
+                xref: 'paper',
+                yref: 'paper',
+                x: 0.14,
+                xanchor: 'left',
+                y: 0.99,
+                yanchor: 'top',
+                text: '<i>* Liquid dropout lines are approximate;<br>   flash calculations not made.</i>',
+                showarrow: false,
+                bordercolor: theme.annotBorder,
+                borderwidth: 1,
+                borderpad: 5,
+                bgcolor: theme.annotBg,
+                font: {
+                    size: 10,
+                    color: theme.annotFont
+                },
+                align: 'left'
+            });
+        }
 
         return layout;
     },
 
     _buildConfig: function () {
         return {
-            responsive: false,
+            responsive: true,
             displayModeBar: true,
             displaylogo: false,
             modeBarButtonsToRemove: ['lasso2d', 'select2d'],

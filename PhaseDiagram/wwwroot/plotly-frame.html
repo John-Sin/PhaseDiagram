@@ -25,11 +25,15 @@
 <body>
     <div id="plot"></div>
     <script>
-    // The parent window calls this to render the chart
+        // The parent window calls this to render the chart
         window.renderPlot = function (data, layout, config) {
             var el = document.getElementById('plot');
             Plotly.purge(el);
-            Plotly.newPlot(el, data, layout, config);
-        };</script>
+            Plotly.newPlot(el, data, layout, config).then(function () {
+                // Force Plotly to measure the container after initial paint
+                Plotly.Plots.resize(el);
+            });
+        };
+    </script>
 </body>
 </html>
