@@ -5,7 +5,7 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 
-namespace PhaseDiagram.Services.Thermo;
+namespace Reflex.Modules.PhaseDiagram.Services.Thermo;
 
 public sealed class CoolPropSharpWrapper : ICoolPropWrapper
 {

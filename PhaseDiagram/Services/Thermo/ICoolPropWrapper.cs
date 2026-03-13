@@ -1,4 +1,4 @@
-﻿namespace PhaseDiagram.Services.Thermo;
+﻿namespace Reflex.Modules.PhaseDiagram.Services.Thermo;
 
 /// <summary>
 /// Abstraction interface for CoolProp thermodynamic calculations.

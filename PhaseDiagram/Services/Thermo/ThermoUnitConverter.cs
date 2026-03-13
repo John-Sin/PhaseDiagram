@@ -1,4 +1,4 @@
-﻿namespace PhaseDiagram.Services.Thermo;
+﻿namespace Reflex.Modules.PhaseDiagram.Services.Thermo;
 
 /// <summary>
 /// Unit conversion utilities for petroleum engineering thermodynamics.

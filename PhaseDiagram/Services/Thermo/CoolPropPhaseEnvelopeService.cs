@@ -1,4 +1,4 @@
-﻿namespace PhaseDiagram.Services.Thermo;
+﻿namespace Reflex.Modules.PhaseDiagram.Services.Thermo;
 
 /// <summary>
 /// Phase envelope service using CoolProp PR/SRK build_phase_envelope.

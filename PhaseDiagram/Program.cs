@@ -1,5 +1,5 @@
-﻿using PhaseDiagram.Components;
-using PhaseDiagram.Services.Thermo;
+﻿using Reflex.Modules.PhaseDiagram.Components;
+using Reflex.Modules.PhaseDiagram.Services.Thermo;
 using System.Diagnostics;
 
 var builder = WebApplication.CreateBuilder(args);

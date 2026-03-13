@@ -6,7 +6,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>Reflex.Modules.PhaseDiagram</RootNamespace>
   </PropertyGroup>
-
+  
   <ItemGroup>
     <PackageReference Include="SharpFluids" Version="3.0.510" />
     <PackageReference Include="SharpProp" Version="7.8.0" />
@@ -17,6 +17,9 @@
     <None Include="CoolProp64.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+  </ItemGroup>
+
+  <ItemGroup>
   </ItemGroup>
 
 </Project>
